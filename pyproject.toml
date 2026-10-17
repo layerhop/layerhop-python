@@ -24,6 +24,8 @@ dev = ["pytest>=7", "anyio>=4"]
 [project.urls]
 Homepage = "https://layerhop.com"
 Documentation = "https://docs.layerhop.com/sdks/python"
+Repository = "https://github.com/layerhop/layerhop-python"
+Issues = "https://github.com/layerhop/layerhop-python/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/layerhop"]
