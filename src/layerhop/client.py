@@ -19,6 +19,8 @@ from .types import (
     FINAL_STATES,
     BuiltTx,
     Chain,
+    CheckoutProduct,
+    CheckoutProductsPage,
     CheckoutQuoteResponse,
     CheckoutSession,
     CheckoutSessionsPage,
@@ -38,11 +40,21 @@ from .types import (
 
 DEFAULT_BASE_URL = "https://api.layerhop.com"
 DEFAULT_TIMEOUT = 30.0
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 
 def _seg(v: str) -> str:
     return _urlquote(str(v), safe="")
+
+
+class _Unset:
+    """Marks an omitted argument of ``products.update`` (``None`` sends ``null`` to clear a field)."""
+
+    def __repr__(self) -> str:
+        return "UNSET"
+
+
+_UNSET: Any = _Unset()
 
 
 class _SseParser:
@@ -157,6 +169,46 @@ class _Base:
         return b
 
     @staticmethod
+    def _product_body(fields: Dict[str, Any], *, skip: Any) -> Dict[str, Any]:
+        """camelCase JSON body from snake_case arguments, leaving out values that are ``skip``."""
+        amount = fields.get("amount", skip)
+        if amount is not skip and not isinstance(amount, str):
+            raise TypeError("amount must be an integer string in base units (e.g. '49000000')")
+        names = {
+            "name": "name", "description": "description", "merchant_name": "merchantName", "amount": "amount",
+            "settle_chain": "settleChain", "settle_token": "settleToken", "recipient": "recipient",
+            "success_url": "successUrl", "cancel_url": "cancelUrl", "expires_in_minutes": "expiresInMinutes",
+            "allowed_origins": "allowedOrigins", "active": "active",
+        }
+        b: Dict[str, Any] = {}
+        for k, key in names.items():
+            v = fields.get(k, skip)
+            if v is skip:
+                continue
+            b[key] = str(v) if k == "settle_chain" and v is not None else v
+        return b
+
+    @staticmethod
+    def _product_list_params(active: Optional[bool], cursor: Optional[str], limit: Optional[int]) -> Dict[str, str]:
+        p: Dict[str, str] = {}
+        if active is not None:
+            p["active"] = "true" if active else "false"
+        if cursor:
+            p["cursor"] = cursor
+        if limit is not None:
+            p["limit"] = str(limit)
+        return p
+
+    @staticmethod
+    def _product_session_body(reference: Optional[str], metadata: Optional[Dict[str, str]]) -> Dict[str, Any]:
+        b: Dict[str, Any] = {}
+        if reference is not None:
+            b["reference"] = reference
+        if metadata is not None:
+            b["metadata"] = metadata
+        return b
+
+    @staticmethod
     def _checkout_quote_body(src_chain: Union[str, int], src_token: str, sender: str, slippage_bps: Optional[int]) -> Dict[str, Any]:
         b: Dict[str, Any] = {"srcChain": str(src_chain), "srcToken": src_token, "sender": sender}
         if slippage_bps is not None:
@@ -183,15 +235,114 @@ class _Base:
         )
 
 
-class Checkout:
-    """Checkout ("pay with any token"), as ``LayerHop.checkout``.
+class CheckoutProducts:
+    """Products, as ``LayerHop.checkout.products``: a fixed price for payment buttons,
+    ``layerhop.com/buy/{id}`` links and store plugins.
 
-    ``create``, ``list`` and ``expire`` need an API key; ``get`` and ``quote`` are public (the
-    payer's side). Pay a quote with ``build_tx`` + ``report_submitted`` as usual.
+    ``create``, ``list`` and ``update`` need an API key; ``get`` and ``start_session`` are public.
+    ``start_session`` can only add a ``reference`` and ``metadata`` to the product's terms.
     """
 
     def __init__(self, client: "LayerHop") -> None:
         self._c = client
+
+    def create(
+        self, name: str, amount: str, settle_chain: Union[str, int], settle_token: str, recipient: str, *,
+        description: Optional[str] = None, merchant_name: Optional[str] = None, success_url: Optional[str] = None,
+        cancel_url: Optional[str] = None, expires_in_minutes: Optional[int] = None,
+        allowed_origins: Optional[List[str]] = None, active: Optional[bool] = None,
+    ) -> CheckoutProduct:
+        """Create a product priced at ``amount`` (base units of the settlement token). Share its ``url``."""
+        return self._c._call("POST", "/checkout/products", json=_Base._product_body(dict(
+            name=name, amount=amount, settle_chain=settle_chain, settle_token=settle_token, recipient=recipient,
+            description=description, merchant_name=merchant_name, success_url=success_url, cancel_url=cancel_url,
+            expires_in_minutes=expires_in_minutes, allowed_origins=allowed_origins, active=active), skip=None))
+
+    def get(self, id: str) -> CheckoutProduct:
+        """Public: name, price and settlement. With the owner's API key: every field."""
+        return self._c._call("GET", f"/checkout/products/{_seg(id)}")
+
+    def list(
+        self, *, active: Optional[bool] = None, cursor: Optional[str] = None, limit: Optional[int] = None,
+    ) -> CheckoutProductsPage:
+        """Your products of the key's mode (live or test). Pass ``nextCursor`` to page."""
+        return self._c._call("GET", "/checkout/products", params=_Base._product_list_params(active, cursor, limit))
+
+    def update(
+        self, id: str, *, name: Any = _UNSET, description: Any = _UNSET, merchant_name: Any = _UNSET,
+        amount: Any = _UNSET, settle_chain: Any = _UNSET, settle_token: Any = _UNSET, recipient: Any = _UNSET,
+        success_url: Any = _UNSET, cancel_url: Any = _UNSET, expires_in_minutes: Any = _UNSET,
+        allowed_origins: Any = _UNSET, active: Any = _UNSET,
+    ) -> CheckoutProduct:
+        """Change only the fields you pass (``None`` clears a nullable field). ``active=False`` stops
+        new sessions; existing sessions keep their terms."""
+        return self._c._call("PATCH", f"/checkout/products/{_seg(id)}", json=_Base._product_body(dict(
+            name=name, amount=amount, settle_chain=settle_chain, settle_token=settle_token, recipient=recipient,
+            description=description, merchant_name=merchant_name, success_url=success_url, cancel_url=cancel_url,
+            expires_in_minutes=expires_in_minutes, allowed_origins=allowed_origins, active=active), skip=_UNSET))
+
+    def start_session(
+        self, id: str, *, reference: Optional[str] = None, metadata: Optional[Dict[str, str]] = None,
+    ) -> CheckoutSession:
+        """Public. Start a checkout session on the product's terms; send the payer to its ``url``."""
+        return self._c._call("POST", f"/checkout/products/{_seg(id)}/sessions",
+                             json=_Base._product_session_body(reference, metadata))
+
+
+class AsyncCheckoutProducts:
+    """Products, as ``AsyncLayerHop.checkout.products``. Same methods as :class:`CheckoutProducts`."""
+
+    def __init__(self, client: "AsyncLayerHop") -> None:
+        self._c = client
+
+    async def create(
+        self, name: str, amount: str, settle_chain: Union[str, int], settle_token: str, recipient: str, *,
+        description: Optional[str] = None, merchant_name: Optional[str] = None, success_url: Optional[str] = None,
+        cancel_url: Optional[str] = None, expires_in_minutes: Optional[int] = None,
+        allowed_origins: Optional[List[str]] = None, active: Optional[bool] = None,
+    ) -> CheckoutProduct:
+        return await self._c._call("POST", "/checkout/products", json=_Base._product_body(dict(
+            name=name, amount=amount, settle_chain=settle_chain, settle_token=settle_token, recipient=recipient,
+            description=description, merchant_name=merchant_name, success_url=success_url, cancel_url=cancel_url,
+            expires_in_minutes=expires_in_minutes, allowed_origins=allowed_origins, active=active), skip=None))
+
+    async def get(self, id: str) -> CheckoutProduct:
+        return await self._c._call("GET", f"/checkout/products/{_seg(id)}")
+
+    async def list(
+        self, *, active: Optional[bool] = None, cursor: Optional[str] = None, limit: Optional[int] = None,
+    ) -> CheckoutProductsPage:
+        return await self._c._call("GET", "/checkout/products", params=_Base._product_list_params(active, cursor, limit))
+
+    async def update(
+        self, id: str, *, name: Any = _UNSET, description: Any = _UNSET, merchant_name: Any = _UNSET,
+        amount: Any = _UNSET, settle_chain: Any = _UNSET, settle_token: Any = _UNSET, recipient: Any = _UNSET,
+        success_url: Any = _UNSET, cancel_url: Any = _UNSET, expires_in_minutes: Any = _UNSET,
+        allowed_origins: Any = _UNSET, active: Any = _UNSET,
+    ) -> CheckoutProduct:
+        return await self._c._call("PATCH", f"/checkout/products/{_seg(id)}", json=_Base._product_body(dict(
+            name=name, amount=amount, settle_chain=settle_chain, settle_token=settle_token, recipient=recipient,
+            description=description, merchant_name=merchant_name, success_url=success_url, cancel_url=cancel_url,
+            expires_in_minutes=expires_in_minutes, allowed_origins=allowed_origins, active=active), skip=_UNSET))
+
+    async def start_session(
+        self, id: str, *, reference: Optional[str] = None, metadata: Optional[Dict[str, str]] = None,
+    ) -> CheckoutSession:
+        return await self._c._call("POST", f"/checkout/products/{_seg(id)}/sessions",
+                                   json=_Base._product_session_body(reference, metadata))
+
+
+class Checkout:
+    """Checkout ("pay with any token"), as ``LayerHop.checkout``.
+
+    ``create``, ``list`` and ``expire`` need an API key; ``get`` and ``quote`` are public (the
+    payer's side). Pay a quote with ``build_tx`` + ``report_submitted`` as usual. Products (payment
+    buttons) are under ``products``.
+    """
+
+    def __init__(self, client: "LayerHop") -> None:
+        self._c = client
+        self.products = CheckoutProducts(client)
 
     def create(
         self, amount: str, settle_chain: Union[str, int], settle_token: str, recipient: str, *,
@@ -236,6 +387,7 @@ class AsyncCheckout:
 
     def __init__(self, client: "AsyncLayerHop") -> None:
         self._c = client
+        self.products = AsyncCheckoutProducts(client)
 
     async def create(
         self, amount: str, settle_chain: Union[str, int], settle_token: str, recipient: str, *,

@@ -196,6 +196,7 @@ class CheckoutSession(TypedDict):
     merchantName: NotRequired[Optional[str]]
     description: NotRequired[Optional[str]]
     url: str  # The hosted checkout page: send the payer here.
+    productId: NotRequired[Optional[str]]  # The product the session was started from, if any.
     successUrl: NotRequired[Optional[str]]
     cancelUrl: NotRequired[Optional[str]]
     expiresAt: str
@@ -208,6 +209,34 @@ class CheckoutSession(TypedDict):
 
 class CheckoutSessionsPage(TypedDict):
     sessions: List[CheckoutSession]
+    nextCursor: Optional[str]
+
+
+class CheckoutProduct(TypedDict):
+    """A fixed price for payment buttons, ``layerhop.com/buy/{id}`` links and store plugins."""
+
+    id: str
+    object: Literal["checkout.product"]
+    livemode: bool
+    active: bool
+    name: str
+    description: NotRequired[Optional[str]]
+    merchantName: NotRequired[Optional[str]]
+    amount: str
+    settlement: CheckoutSettlement
+    url: str  # ``https://layerhop.com/buy/{id}``: starts a session and opens the payment page.
+    # Owner only (with the account's API key):
+    recipient: NotRequired[str]
+    successUrl: NotRequired[Optional[str]]
+    cancelUrl: NotRequired[Optional[str]]
+    expiresInMinutes: NotRequired[int]
+    allowedOrigins: NotRequired[List[str]]
+    createdAt: NotRequired[str]
+    updatedAt: NotRequired[str]
+
+
+class CheckoutProductsPage(TypedDict):
+    products: List[CheckoutProduct]
     nextCursor: Optional[str]
 
 

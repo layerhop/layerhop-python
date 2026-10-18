@@ -86,6 +86,11 @@ async with AsyncLayerHop() as lh:
 | `checkout.expire(id)` | `POST /v1/checkout/sessions/{id}/expire` |
 | `checkout.quote(id, src_chain, src_token, *, sender, slippage_bps=None)` | `POST /v1/checkout/sessions/{id}/quote` (public) |
 | `checkout.stream(id)` | `GET /v1/checkout/sessions/{id}/events` (SSE, public) |
+| `checkout.products.create(name, amount, settle_chain, settle_token, recipient, *, description, merchant_name, success_url, cancel_url, expires_in_minutes, allowed_origins, active)` | `POST /v1/checkout/products` |
+| `checkout.products.list(*, active, cursor, limit)` | `GET /v1/checkout/products` |
+| `checkout.products.get(id)` | `GET /v1/checkout/products/{id}` (public) |
+| `checkout.products.update(id, **fields)` | `PATCH /v1/checkout/products/{id}` (only the fields you pass) |
+| `checkout.products.start_session(id, *, reference, metadata)` | `POST /v1/checkout/products/{id}/sessions` (public) |
 | `webhooks.stream()` | `GET /v1/webhooks/stream` (SSE, API key) |
 | `webhooks.trigger(type)` | `POST /v1/webhooks/trigger` (test keys only) |
 
@@ -149,6 +154,30 @@ lh.report_submitted(best["quoteId"], tx_hash)
 
 The async client has the same methods under `await lh.checkout.…`. Guide:
 https://docs.layerhop.com/guides/checkout
+
+## Products and payment buttons
+
+A product is a fixed price (amount, settlement token, payout address and redirect URLs) that
+anyone may start a session from without being able to change it: the backing for payment
+buttons, `https://layerhop.com/buy/{id}` links and store plugins. `create`, `list` and `update`
+need your API key; `get` and `start_session` are public.
+
+```python
+product = lh.checkout.products.create("Pro plan", "49000000", "base", "USDC", "0xYourPayoutAddress",
+                                      description="1 month", success_url="https://shop.example.com/thanks",
+                                      allowed_origins=["https://shop.example.com"])
+print(product["url"])  # https://layerhop.com/buy/prod_...: share it or put it behind a button
+
+lh.checkout.products.list(active=True)
+lh.checkout.products.update(product["id"], active=False)  # stops new sessions; only passed fields change
+
+# Public (no key): start a session on the product's terms, adding only your order id.
+session = LayerHop().checkout.products.start_session(product["id"], reference="order_1042")
+print(session["url"], session["productId"])
+```
+
+`update` sends only the fields you pass; pass `None` to clear a nullable field such as
+`description`. Guide: https://docs.layerhop.com/guides/payment-buttons
 
 ## Test mode
 
