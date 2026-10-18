@@ -7,6 +7,7 @@ signs and broadcasts.
 from __future__ import annotations
 
 import asyncio
+import json as _json
 import time
 from typing import Any, AsyncIterator, Dict, Iterator, List, Optional, Union
 from urllib.parse import quote as _urlquote
@@ -23,21 +24,51 @@ from .types import (
     CheckoutSessionsPage,
     CheckoutStatus,
     FeeChannel,
+    Order,
     OrdersPage,
     OrderStatus,
     QuoteResponse,
     ReportSubmittedResponse,
     SimulateResponse,
     Token,
+    TriggerWebhookResponse,
+    WebhookEvent,
+    WebhookEventType,
 )
 
 DEFAULT_BASE_URL = "https://api.layerhop.com"
 DEFAULT_TIMEOUT = 30.0
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 
 def _seg(v: str) -> str:
     return _urlquote(str(v), safe="")
+
+
+class _SseParser:
+    """Incremental Server-Sent Events parser, fed one line (without its terminator) at a time.
+
+    ``feed`` returns the joined ``data`` of a completed frame whose name is ``event``, else ``None``.
+    Comment lines (``:``) are skipped; frames of other names (``ready``) are ignored.
+    """
+
+    def __init__(self, event: str) -> None:
+        self.event = event
+        self._name = "message"
+        self._data: List[str] = []
+
+    def feed(self, line: str) -> Optional[str]:
+        line = line.rstrip("\r")
+        if line == "":
+            name, data = self._name, self._data
+            self._name, self._data = "message", []
+            return "\n".join(data) if name == self.event and data else None
+        if line.startswith("event:"):
+            self._name = line[6:].strip()
+        elif line.startswith("data:"):
+            v = line[5:]
+            self._data.append(v[1:] if v.startswith(" ") else v)
+        return None
 
 
 class _Base:
@@ -50,6 +81,7 @@ class _Base:
         integrator: Optional[str] = None,
         integrator_fee_bps: Optional[int] = None,
         timeout: float = DEFAULT_TIMEOUT,
+        stream_timeout: Optional[float] = None,
     ) -> None:
         self.base_url = (base_url or DEFAULT_BASE_URL).rstrip("/")
         self.api_key = api_key
@@ -57,6 +89,14 @@ class _Base:
         self.integrator = integrator
         self.integrator_fee_bps = integrator_fee_bps
         self.timeout = timeout
+        self.stream_timeout = stream_timeout
+
+    def _stream_headers(self) -> Dict[str, str]:
+        return {**self._headers(), "accept": "text/event-stream"}
+
+    def _stream_timeout_config(self) -> httpx.Timeout:
+        # Streams are long-lived and only send a ping every 15 s: no read timeout by default.
+        return httpx.Timeout(self.timeout, read=self.stream_timeout)
 
     def _headers(self) -> Dict[str, str]:
         h = {"accept": "application/json", "user-agent": f"layerhop-python/{__version__}"}
@@ -185,6 +225,11 @@ class Checkout:
         return self._c._call("POST", f"/checkout/sessions/{_seg(id)}/quote",
                              json=_Base._checkout_quote_body(src_chain, src_token, sender, slippage_bps))
 
+    def stream(self, id: str) -> Iterator[CheckoutSession]:
+        """Public. Live session status (SSE): yields now and on every change until ``paid``,
+        ``expired`` or ``needs_review``, then ends. Break out of the loop to stop early."""
+        return self._c._stream(f"/checkout/sessions/{_seg(id)}/events", "session")
+
 
 class AsyncCheckout:
     """Checkout ("pay with any token"), as ``AsyncLayerHop.checkout``. Same methods as :class:`Checkout`."""
@@ -219,6 +264,39 @@ class AsyncCheckout:
         return await self._c._call("POST", f"/checkout/sessions/{_seg(id)}/quote",
                                    json=_Base._checkout_quote_body(src_chain, src_token, sender, slippage_bps))
 
+    def stream(self, id: str) -> AsyncIterator[CheckoutSession]:
+        """``async for session in lh.checkout.stream(id)``; see :meth:`Checkout.stream`."""
+        return self._c._stream(f"/checkout/sessions/{_seg(id)}/events", "session")
+
+
+class Webhooks:
+    """Webhook developer tools with an API key, as ``LayerHop.webhooks`` (the CLI's ``listen`` and ``trigger``)."""
+
+    def __init__(self, client: "LayerHop") -> None:
+        self._c = client
+
+    def stream(self) -> Iterator[WebhookEvent]:
+        """Your account's webhook events (the key's mode) as they are created, with the exact payloads.
+        Runs until the server closes the stream (at most 30 minutes) or you break out of the loop."""
+        return self._c._stream("/webhooks/stream", "event")
+
+    def trigger(self, type: WebhookEventType) -> TriggerWebhookResponse:
+        """A sample event in test mode (test keys only): sent to your test endpoints and open streams."""
+        return self._c._call("POST", "/webhooks/trigger", json={"type": type})
+
+
+class AsyncWebhooks:
+    """Webhook developer tools, as ``AsyncLayerHop.webhooks``. Same methods as :class:`Webhooks`."""
+
+    def __init__(self, client: "AsyncLayerHop") -> None:
+        self._c = client
+
+    def stream(self) -> AsyncIterator[WebhookEvent]:
+        return self._c._stream("/webhooks/stream", "event")
+
+    async def trigger(self, type: WebhookEventType) -> TriggerWebhookResponse:
+        return await self._c._call("POST", "/webhooks/trigger", json={"type": type})
+
 
 class LayerHop(_Base):
     """Synchronous client.
@@ -236,14 +314,16 @@ class LayerHop(_Base):
         integrator: Optional[str] = None,
         integrator_fee_bps: Optional[int] = None,
         timeout: float = DEFAULT_TIMEOUT,
+        stream_timeout: Optional[float] = None,
         http_client: Optional[httpx.Client] = None,
         transport: Optional[httpx.BaseTransport] = None,
     ) -> None:
         super().__init__(base_url=base_url, api_key=api_key, channel=channel, integrator=integrator,
-                         integrator_fee_bps=integrator_fee_bps, timeout=timeout)
+                         integrator_fee_bps=integrator_fee_bps, timeout=timeout, stream_timeout=stream_timeout)
         self._owns_client = http_client is None
         self._client = http_client or httpx.Client(timeout=timeout, transport=transport)
         self.checkout = Checkout(self)
+        self.webhooks = Webhooks(self)
 
     def close(self) -> None:
         if self._owns_client:
@@ -258,6 +338,19 @@ class LayerHop(_Base):
     def _call(self, method: str, path: str, *, params: Optional[Dict[str, str]] = None, json: Any = None) -> Any:
         res = self._client.request(method, self._url(path), params=params, json=json, headers=self._headers())
         return self._handle(res)
+
+    def _stream(self, path: str, event: str) -> Iterator[Any]:
+        """Read a Server-Sent Events stream, yielding the JSON data of ``event`` frames."""
+        with self._client.stream("GET", self._url(path), headers=self._stream_headers(),
+                                 timeout=self._stream_timeout_config()) as res:
+            if not res.is_success:
+                res.read()
+                self._handle(res)
+            parser = _SseParser(event)
+            for line in res.iter_lines():
+                data = parser.feed(line)
+                if data is not None:
+                    yield _json.loads(data)
 
     def health(self) -> Dict[str, Any]:
         return self._call("GET", "/health")
@@ -302,6 +395,11 @@ class LayerHop(_Base):
         """Orders by sender or recipient address, newest first. Pass ``nextCursor`` to page."""
         return self._call("GET", "/orders", params=self._orders_params(address, status, cursor, limit))
 
+    def stream_order(self, quote_id: str) -> Iterator[Order]:
+        """Live order status (Server-Sent Events): yields the order now and on every change, and ends
+        when it is final (filled, refunded, failed or expired). Break out of the loop to stop early."""
+        return self._stream(f"/orders/{_seg(quote_id)}/events", "order")
+
     def watch(self, provider: str, id: str, *, interval: float = 3.0, timeout: float = 1800.0) -> Iterator[OrderStatus]:
         """Poll until the order is final (filled/refunded/failed), yielding each state change."""
         end = time.monotonic() + timeout
@@ -328,14 +426,16 @@ class AsyncLayerHop(_Base):
         integrator: Optional[str] = None,
         integrator_fee_bps: Optional[int] = None,
         timeout: float = DEFAULT_TIMEOUT,
+        stream_timeout: Optional[float] = None,
         http_client: Optional[httpx.AsyncClient] = None,
         transport: Optional[httpx.AsyncBaseTransport] = None,
     ) -> None:
         super().__init__(base_url=base_url, api_key=api_key, channel=channel, integrator=integrator,
-                         integrator_fee_bps=integrator_fee_bps, timeout=timeout)
+                         integrator_fee_bps=integrator_fee_bps, timeout=timeout, stream_timeout=stream_timeout)
         self._owns_client = http_client is None
         self._client = http_client or httpx.AsyncClient(timeout=timeout, transport=transport)
         self.checkout = AsyncCheckout(self)
+        self.webhooks = AsyncWebhooks(self)
 
     async def aclose(self) -> None:
         if self._owns_client:
@@ -350,6 +450,18 @@ class AsyncLayerHop(_Base):
     async def _call(self, method: str, path: str, *, params: Optional[Dict[str, str]] = None, json: Any = None) -> Any:
         res = await self._client.request(method, self._url(path), params=params, json=json, headers=self._headers())
         return self._handle(res)
+
+    async def _stream(self, path: str, event: str) -> AsyncIterator[Any]:
+        async with self._client.stream("GET", self._url(path), headers=self._stream_headers(),
+                                       timeout=self._stream_timeout_config()) as res:
+            if not res.is_success:
+                await res.aread()
+                self._handle(res)
+            parser = _SseParser(event)
+            async for line in res.aiter_lines():
+                data = parser.feed(line)
+                if data is not None:
+                    yield _json.loads(data)
 
     async def health(self) -> Dict[str, Any]:
         return await self._call("GET", "/health")
@@ -387,6 +499,10 @@ class AsyncLayerHop(_Base):
         cursor: Optional[str] = None, limit: Optional[int] = None,
     ) -> OrdersPage:
         return await self._call("GET", "/orders", params=self._orders_params(address, status, cursor, limit))
+
+    def stream_order(self, quote_id: str) -> AsyncIterator[Order]:
+        """``async for order in lh.stream_order(quote_id)``; see :meth:`LayerHop.stream_order`."""
+        return self._stream(f"/orders/{_seg(quote_id)}/events", "order")
 
     async def watch(self, provider: str, id: str, *, interval: float = 3.0, timeout: float = 1800.0) -> AsyncIterator[OrderStatus]:
         end = time.monotonic() + timeout
