@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import json as _json
 import time
-from typing import Any, AsyncIterator, Dict, Iterator, List, Optional, Union
+from typing import Any, AsyncIterator, Dict, Iterator, List, Optional, Union, overload
 from urllib.parse import quote as _urlquote
 
 import httpx
@@ -26,12 +26,21 @@ from .types import (
     CheckoutSessionsPage,
     CheckoutStatus,
     FeeChannel,
+    Invoice,
+    InvoiceLineItem,
+    InvoicePayResponse,
+    InvoicesPage,
+    InvoiceStatus,
     Order,
     OrdersPage,
     OrderStatus,
+    PublicInvoice,
     QuoteResponse,
+    Refund,
+    RefundCreateResponse,
     ReportSubmittedResponse,
     SimulateResponse,
+    StatusResponse,
     Token,
     TriggerWebhookResponse,
     WebhookEvent,
@@ -40,7 +49,7 @@ from .types import (
 
 DEFAULT_BASE_URL = "https://api.layerhop.com"
 DEFAULT_TIMEOUT = 30.0
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 
 def _seg(v: str) -> str:
@@ -216,6 +225,37 @@ class _Base:
         return b
 
     @staticmethod
+    def _invoice_body(fields: Dict[str, Any], *, skip: Any) -> Dict[str, Any]:
+        """camelCase invoice body from snake_case arguments, leaving out values that are ``skip``."""
+        items = fields.get("line_items", skip)
+        if items is not skip and items is not None:
+            for li in items:
+                if not isinstance(li.get("unitAmount"), str):
+                    raise TypeError("unitAmount must be an integer string in base units (e.g. '49000000')")
+        names = {
+            "customer_email": "customerEmail", "customer_name": "customerName", "merchant_name": "merchantName",
+            "memo": "memo", "line_items": "lineItems", "settle_chain": "settleChain", "settle_token": "settleToken",
+            "recipient": "recipient", "due_at": "dueAt", "send": "send",
+        }
+        b: Dict[str, Any] = {}
+        for k, key in names.items():
+            v = fields.get(k, skip)
+            if v is skip:
+                continue
+            b[key] = str(v) if k == "settle_chain" and v is not None else v
+        return b
+
+    @staticmethod
+    def _refund_body(amount: Optional[str], reason: Optional[str], from_: Optional[str], to: Optional[str]) -> Dict[str, Any]:
+        if amount is not None and not isinstance(amount, str):
+            raise TypeError("amount must be an integer string in base units (e.g. '10000000')")
+        b: Dict[str, Any] = {}
+        for k, v in (("amount", amount), ("reason", reason), ("from", from_), ("to", to)):
+            if v is not None:
+                b[k] = v
+        return b
+
+    @staticmethod
     def _handle(res: httpx.Response) -> Any:
         try:
             body = res.json()
@@ -332,17 +372,168 @@ class AsyncCheckoutProducts:
                                    json=_Base._product_session_body(reference, metadata))
 
 
+class CheckoutRefunds:
+    """Refunds of paid sessions, as ``LayerHop.checkout.refunds`` (API key).
+
+    Non-custodial: ``create`` returns a ``quote`` that you build with ``build_tx``, sign from
+    ``quote["from"]`` (your wallet) and report with ``report_submitted``. The refund completes when
+    that order fills; the session's ``refundedAmount`` grows and ``checkout.session.refunded`` is sent.
+    """
+
+    def __init__(self, client: "LayerHop") -> None:
+        self._c = client
+
+    def create(
+        self, session_id: str, *, amount: Optional[str] = None, reason: Optional[str] = None,
+        from_: Optional[str] = None, to: Optional[str] = None,
+    ) -> RefundCreateResponse:
+        """Refund ``amount`` (settlement-token base units; default: everything not yet refunded).
+        ``from_`` is the signing wallet (default: the payout address); ``to`` is ``"original"``
+        (the payer's chain and token, default) or ``"settlement"``."""
+        return self._c._call("POST", f"/checkout/sessions/{_seg(session_id)}/refunds",
+                             json=_Base._refund_body(amount, reason, from_, to))
+
+    def list(self, session_id: str) -> List[Refund]:
+        """The session's refunds, newest first."""
+        return self._c._call("GET", f"/checkout/sessions/{_seg(session_id)}/refunds")["refunds"]
+
+
+class AsyncCheckoutRefunds:
+    """Refunds, as ``AsyncLayerHop.checkout.refunds``. Same methods as :class:`CheckoutRefunds`."""
+
+    def __init__(self, client: "AsyncLayerHop") -> None:
+        self._c = client
+
+    async def create(
+        self, session_id: str, *, amount: Optional[str] = None, reason: Optional[str] = None,
+        from_: Optional[str] = None, to: Optional[str] = None,
+    ) -> RefundCreateResponse:
+        return await self._c._call("POST", f"/checkout/sessions/{_seg(session_id)}/refunds",
+                                   json=_Base._refund_body(amount, reason, from_, to))
+
+    async def list(self, session_id: str) -> List[Refund]:
+        return (await self._c._call("GET", f"/checkout/sessions/{_seg(session_id)}/refunds"))["refunds"]
+
+
+class Invoices:
+    """Invoices, as ``LayerHop.invoices``: line items billed to a customer by email and paid through
+    checkout on ``layerhop.com/invoice/{id}``.
+
+    ``create``, ``get``, ``list``, ``update``, ``send`` and ``void`` need an API key; ``public_view``
+    and ``pay`` are public (the customer's side).
+    """
+
+    def __init__(self, client: "LayerHop") -> None:
+        self._c = client
+
+    def create(
+        self, line_items: List[InvoiceLineItem], settle_chain: Union[str, int], settle_token: str, recipient: str, *,
+        customer_email: Optional[str] = None, customer_name: Optional[str] = None, merchant_name: Optional[str] = None,
+        memo: Optional[str] = None, due_at: Optional[str] = None, send: Optional[bool] = None,
+    ) -> Invoice:
+        """Create a draft invoice (``send=True`` finalizes and emails it right away). Line items are
+        ``{"description", "quantity", "unitAmount"}`` with ``unitAmount`` in base units."""
+        return self._c._call("POST", "/invoices", json=_Base._invoice_body(dict(
+            line_items=line_items, settle_chain=settle_chain, settle_token=settle_token, recipient=recipient,
+            customer_email=customer_email, customer_name=customer_name, merchant_name=merchant_name, memo=memo,
+            due_at=due_at, send=send), skip=None))
+
+    def get(self, id: str) -> Invoice:
+        return self._c._call("GET", f"/invoices/{_seg(id)}")
+
+    def list(
+        self, *, status: Optional[InvoiceStatus] = None, cursor: Optional[str] = None, limit: Optional[int] = None,
+    ) -> InvoicesPage:
+        """Your invoices of the key's mode (live or test), newest first. Pass ``nextCursor`` to page."""
+        return self._c._call("GET", "/invoices", params=_Base._orders_params(None, status, cursor, limit))
+
+    def update(
+        self, id: str, *, line_items: Any = _UNSET, settle_chain: Any = _UNSET, settle_token: Any = _UNSET,
+        recipient: Any = _UNSET, customer_email: Any = _UNSET, customer_name: Any = _UNSET,
+        merchant_name: Any = _UNSET, memo: Any = _UNSET, due_at: Any = _UNSET,
+    ) -> Invoice:
+        """Drafts only. Change only the fields you pass (``None`` clears a nullable field)."""
+        return self._c._call("PATCH", f"/invoices/{_seg(id)}", json=_Base._invoice_body(dict(
+            line_items=line_items, settle_chain=settle_chain, settle_token=settle_token, recipient=recipient,
+            customer_email=customer_email, customer_name=customer_name, merchant_name=merchant_name, memo=memo,
+            due_at=due_at), skip=_UNSET))
+
+    def send(self, id: str) -> Invoice:
+        """Finalize a draft (draft -> open) and email it; on an open invoice, re-send the email."""
+        return self._c._call("POST", f"/invoices/{_seg(id)}/send", json={})
+
+    def void(self, id: str) -> Invoice:
+        """Cancel a draft or open invoice (its open checkout session expires)."""
+        return self._c._call("POST", f"/invoices/{_seg(id)}/void", json={})
+
+    def public_view(self, id: str) -> PublicInvoice:
+        """Public: the customer's view of a sent invoice."""
+        return self._c._call("GET", f"/invoices/{_seg(id)}/public")
+
+    def pay(self, id: str) -> InvoicePayResponse:
+        """Public: start (or reuse) the checkout session that pays the invoice; send the customer to ``url``."""
+        return self._c._call("POST", f"/invoices/{_seg(id)}/pay", json={})
+
+
+class AsyncInvoices:
+    """Invoices, as ``AsyncLayerHop.invoices``. Same methods as :class:`Invoices`."""
+
+    def __init__(self, client: "AsyncLayerHop") -> None:
+        self._c = client
+
+    async def create(
+        self, line_items: List[InvoiceLineItem], settle_chain: Union[str, int], settle_token: str, recipient: str, *,
+        customer_email: Optional[str] = None, customer_name: Optional[str] = None, merchant_name: Optional[str] = None,
+        memo: Optional[str] = None, due_at: Optional[str] = None, send: Optional[bool] = None,
+    ) -> Invoice:
+        return await self._c._call("POST", "/invoices", json=_Base._invoice_body(dict(
+            line_items=line_items, settle_chain=settle_chain, settle_token=settle_token, recipient=recipient,
+            customer_email=customer_email, customer_name=customer_name, merchant_name=merchant_name, memo=memo,
+            due_at=due_at, send=send), skip=None))
+
+    async def get(self, id: str) -> Invoice:
+        return await self._c._call("GET", f"/invoices/{_seg(id)}")
+
+    async def list(
+        self, *, status: Optional[InvoiceStatus] = None, cursor: Optional[str] = None, limit: Optional[int] = None,
+    ) -> InvoicesPage:
+        return await self._c._call("GET", "/invoices", params=_Base._orders_params(None, status, cursor, limit))
+
+    async def update(
+        self, id: str, *, line_items: Any = _UNSET, settle_chain: Any = _UNSET, settle_token: Any = _UNSET,
+        recipient: Any = _UNSET, customer_email: Any = _UNSET, customer_name: Any = _UNSET,
+        merchant_name: Any = _UNSET, memo: Any = _UNSET, due_at: Any = _UNSET,
+    ) -> Invoice:
+        return await self._c._call("PATCH", f"/invoices/{_seg(id)}", json=_Base._invoice_body(dict(
+            line_items=line_items, settle_chain=settle_chain, settle_token=settle_token, recipient=recipient,
+            customer_email=customer_email, customer_name=customer_name, merchant_name=merchant_name, memo=memo,
+            due_at=due_at), skip=_UNSET))
+
+    async def send(self, id: str) -> Invoice:
+        return await self._c._call("POST", f"/invoices/{_seg(id)}/send", json={})
+
+    async def void(self, id: str) -> Invoice:
+        return await self._c._call("POST", f"/invoices/{_seg(id)}/void", json={})
+
+    async def public_view(self, id: str) -> PublicInvoice:
+        return await self._c._call("GET", f"/invoices/{_seg(id)}/public")
+
+    async def pay(self, id: str) -> InvoicePayResponse:
+        return await self._c._call("POST", f"/invoices/{_seg(id)}/pay", json={})
+
+
 class Checkout:
     """Checkout ("pay with any token"), as ``LayerHop.checkout``.
 
     ``create``, ``list`` and ``expire`` need an API key; ``get`` and ``quote`` are public (the
     payer's side). Pay a quote with ``build_tx`` + ``report_submitted`` as usual. Products (payment
-    buttons) are under ``products``.
+    buttons) are under ``products``, refunds of paid sessions under ``refunds``.
     """
 
     def __init__(self, client: "LayerHop") -> None:
         self._c = client
         self.products = CheckoutProducts(client)
+        self.refunds = CheckoutRefunds(client)
 
     def create(
         self, amount: str, settle_chain: Union[str, int], settle_token: str, recipient: str, *,
@@ -388,6 +579,7 @@ class AsyncCheckout:
     def __init__(self, client: "AsyncLayerHop") -> None:
         self._c = client
         self.products = AsyncCheckoutProducts(client)
+        self.refunds = AsyncCheckoutRefunds(client)
 
     async def create(
         self, amount: str, settle_chain: Union[str, int], settle_token: str, recipient: str, *,
@@ -475,6 +667,7 @@ class LayerHop(_Base):
         self._owns_client = http_client is None
         self._client = http_client or httpx.Client(timeout=timeout, transport=transport)
         self.checkout = Checkout(self)
+        self.invoices = Invoices(self)
         self.webhooks = Webhooks(self)
 
     def close(self) -> None:
@@ -537,7 +730,18 @@ class LayerHop(_Base):
         """Build and dry-run the tx without recording an order."""
         return self._call("POST", "/simulate", json={"quoteId": quote_id})
 
-    def status(self, provider: str, id: str) -> OrderStatus:
+    @overload
+    def status(self) -> StatusResponse: ...
+    @overload
+    def status(self, provider: str, id: str) -> OrderStatus: ...
+
+    def status(self, provider: Optional[str] = None, id: Optional[str] = None) -> Any:
+        """``status()``: platform status (``GET /v1/status``, status.layerhop.com; public).
+        ``status(provider, id)``: a provider order's state."""
+        if provider is None:
+            return self._call("GET", "/status")
+        if id is None:
+            raise TypeError("status(provider, id) needs both arguments; call status() for the platform status")
         return self._call("GET", f"/orders/{_seg(provider)}/{_seg(id)}")
 
     def list_orders(
@@ -587,6 +791,7 @@ class AsyncLayerHop(_Base):
         self._owns_client = http_client is None
         self._client = http_client or httpx.AsyncClient(timeout=timeout, transport=transport)
         self.checkout = AsyncCheckout(self)
+        self.invoices = AsyncInvoices(self)
         self.webhooks = AsyncWebhooks(self)
 
     async def aclose(self) -> None:
@@ -643,7 +848,16 @@ class AsyncLayerHop(_Base):
     async def simulate(self, quote_id: str) -> SimulateResponse:
         return await self._call("POST", "/simulate", json={"quoteId": quote_id})
 
-    async def status(self, provider: str, id: str) -> OrderStatus:
+    @overload
+    async def status(self) -> StatusResponse: ...
+    @overload
+    async def status(self, provider: str, id: str) -> OrderStatus: ...
+
+    async def status(self, provider: Optional[str] = None, id: Optional[str] = None) -> Any:
+        if provider is None:
+            return await self._call("GET", "/status")
+        if id is None:
+            raise TypeError("status(provider, id) needs both arguments; call status() for the platform status")
         return await self._call("GET", f"/orders/{_seg(provider)}/{_seg(id)}")
 
     async def list_orders(

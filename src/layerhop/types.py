@@ -152,6 +152,7 @@ class Order(TypedDict, total=False):
     dstTxHash: str
     livemode: bool  # ``False`` for test-mode orders.
     checkoutSessionId: Optional[str]  # The checkout session this order pays, if any.
+    refundId: NotRequired[Optional[str]]  # The checkout refund this order sends, if any.
     createdAt: str
     updatedAt: str
 
@@ -197,6 +198,8 @@ class CheckoutSession(TypedDict):
     description: NotRequired[Optional[str]]
     url: str  # The hosted checkout page: send the payer here.
     productId: NotRequired[Optional[str]]  # The product the session was started from, if any.
+    invoiceId: NotRequired[Optional[str]]  # The invoice this session pays, if any.
+    refundedAmount: NotRequired[str]  # Completed refunds, base units of the settlement token ("0" when none).
     successUrl: NotRequired[Optional[str]]
     cancelUrl: NotRequired[Optional[str]]
     expiresAt: str
@@ -256,7 +259,7 @@ class CheckoutQuoteResponse(TypedDict):
 WebhookEventType = Literal[
     "order.submitted", "order.filled", "order.refunded", "order.failed",
     "checkout.session.processing", "checkout.session.completed", "checkout.session.payment_failed",
-    "checkout.session.expired",
+    "checkout.session.expired", "checkout.session.refunded", "invoice.sent", "invoice.paid",
 ]
 
 
@@ -268,13 +271,140 @@ class WebhookEvent(TypedDict):
     livemode: bool
     sample: NotRequired[bool]  # Present on samples from the dashboard or ``webhooks.trigger``.
     createdAt: str
-    data: Dict[str, Any]  # ``{"order": Order}`` or ``{"session": CheckoutSession}``.
+    data: Dict[str, Any]  # ``{"order": Order}``, ``{"session": CheckoutSession}``, plus ``refund`` / ``invoice``.
 
 
 class TriggerWebhookResponse(TypedDict):
     eventId: str
     deliveries: int  # Test endpoints the event was queued for.
     payload: WebhookEvent
+
+
+InvoiceStatus = Literal["draft", "open", "paid", "void"]
+
+
+class InvoiceLineItem(TypedDict):
+    description: str
+    quantity: int  # 1-10000
+    unitAmount: str  # Price of one unit, base units of the settlement token.
+
+
+class PublicInvoice(TypedDict):
+    """The customer's view of an invoice (``invoices.public_view``, ``layerhop.com/invoice/{id}``)."""
+
+    id: str
+    object: Literal["invoice"]
+    livemode: bool
+    number: str  # ``INV-0001``, numbered per account and mode.
+    status: InvoiceStatus
+    merchantName: Optional[str]
+    customerName: Optional[str]
+    memo: Optional[str]
+    lineItems: List[InvoiceLineItem]
+    amount: str  # Total, base units of the settlement token.
+    settlement: CheckoutSettlement
+    dueAt: Optional[str]
+    paidAt: Optional[str]
+    url: str  # ``https://layerhop.com/invoice/{id}``
+    receiptUrl: Optional[str]  # PDF receipt, once paid.
+    createdAt: str
+
+
+class Invoice(PublicInvoice):
+    """An invoice as its owner sees it (API key)."""
+
+    customerEmail: Optional[str]
+    recipient: str
+    sessionId: Optional[str]  # The checkout session paying the invoice.
+    sentAt: Optional[str]
+    receiptSentAt: Optional[str]
+    voidedAt: Optional[str]
+    updatedAt: str
+
+
+class InvoicesPage(TypedDict):
+    invoices: List[Invoice]
+    nextCursor: Optional[str]
+
+
+class InvoicePayResponse(TypedDict):
+    sessionId: str
+    url: str  # The hosted checkout page.
+
+
+RefundStatus = Literal["pending", "submitted", "completed", "failed"]
+
+
+class RefundDestination(TypedDict):
+    chainId: int
+    token: str
+    address: str
+
+
+class Refund(TypedDict):
+    id: str
+    object: Literal["refund"]
+    sessionId: str
+    livemode: bool
+    status: RefundStatus
+    statusDetail: Optional[str]
+    amount: str  # Base units of the settlement token.
+    reason: Optional[str]
+    quoteId: Optional[str]  # build_tx(quoteId), sign from the ``from`` wallet, then report_submitted.
+    to: RefundDestination
+    txHash: Optional[str]
+    createdAt: str
+    updatedAt: str
+
+
+RefundQuote = TypedDict("RefundQuote", {
+    "quoteId": str, "provider": str, "srcAmount": str, "dstAmount": str, "dstAmountMin": str,
+    "estimatedSeconds": int, "expiresAt": int,
+    "from": str,  # The wallet that must sign the refund.
+})
+
+
+class RefundCreateResponse(TypedDict):
+    refund: Refund
+    quote: RefundQuote
+    next: str  # What to do next (build, sign, report).
+
+
+StatusComponentState = Literal["operational", "degraded", "down"]
+
+
+class StatusDay(TypedDict):
+    date: str
+    uptime: Optional[float]
+
+
+class StatusComponent(TypedDict):
+    id: str
+    name: str
+    group: str
+    status: StatusComponentState
+    latencyMs: Optional[int]
+    uptime90d: Optional[float]  # Percent over 90 days.
+    days: List[StatusDay]  # 90 days, oldest first.
+
+
+class StatusIncident(TypedDict):
+    id: str
+    componentId: str
+    component: str
+    title: str
+    startedAt: str
+    resolvedAt: Optional[str]
+
+
+class StatusResponse(TypedDict):
+    """``GET /v1/status`` (shown at status.layerhop.com)."""
+
+    status: Literal["operational", "degraded", "outage"]
+    updatedAt: str
+    components: List[StatusComponent]
+    incidents: List[StatusIncident]  # The last 14 days.
+    url: str
 
 
 Json = Dict[str, Any]

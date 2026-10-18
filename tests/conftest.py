@@ -80,3 +80,31 @@ CHECKOUT_PRODUCT = {
     "cancelUrl": None, "expiresInMinutes": 60, "allowedOrigins": ["https://shop.example.com"],
     "createdAt": "2026-10-18T10:00:00.000Z", "updatedAt": "2026-10-18T10:00:00.000Z",
 }
+INVOICE = {
+    "id": "inv_01m5c2q2c4x8q6r0v3b5n7p9d", "object": "invoice", "livemode": True, "number": "INV-0001", "status": "open",
+    "merchantName": "Acme", "customerName": "Client Co", "memo": None,
+    "lineItems": [{"description": "Design work", "quantity": 2, "unitAmount": "500000000"}], "amount": "1000000000",
+    "settlement": {"chainId": 8453, "token": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", "symbol": "USDC", "decimals": 6},
+    "dueAt": "2026-11-01T23:59:59.000Z", "paidAt": None,
+    "url": "https://layerhop.com/invoice/inv_01m5c2q2c4x8q6r0v3b5n7p9d", "receiptUrl": None,
+    "createdAt": "2026-10-18T10:00:00.000Z",
+    "customerEmail": "ap@client.example", "recipient": "0x2222222222222222222222222222222222222222", "sessionId": None,
+    "sentAt": "2026-10-18T10:00:00.000Z", "receiptSentAt": None, "voidedAt": None, "updatedAt": "2026-10-18T10:00:00.000Z",
+}
+REFUND = {
+    "id": "re_01m5d7a2c4x8q6r0v3b5n7p9d", "object": "refund", "sessionId": CHECKOUT_SESSION["id"], "livemode": True,
+    "status": "pending", "statusDetail": None, "amount": "10000000", "reason": "Partial refund", "quoteId": "q_r1",
+    "to": {"chainId": 42161, "token": "0x0000000000000000000000000000000000000000",
+           "address": "0x1111111111111111111111111111111111111111"},
+    "txHash": None, "createdAt": "2026-10-18T12:00:00.000Z", "updatedAt": "2026-10-18T12:00:00.000Z",
+}
+STATUS = {
+    "status": "degraded", "updatedAt": "2026-10-18T12:00:00.000Z",
+    "components": [{"id": "api", "name": "API", "group": "Core", "status": "operational", "latencyMs": 41,
+                    "uptime90d": 99.98, "days": [{"date": "2026-10-18", "uptime": 100}]},
+                   {"id": "provider:relay", "name": "Relay", "group": "Liquidity providers", "status": "degraded",
+                    "latencyMs": None, "uptime90d": None, "days": [{"date": "2026-10-18", "uptime": None}]}],
+    "incidents": [{"id": "inc_1", "componentId": "provider:relay", "component": "Relay", "title": "Relay quotes failing",
+                   "startedAt": "2026-10-18T11:50:00.000Z", "resolvedAt": None}],
+    "url": "https://layerhop.com/status",
+}

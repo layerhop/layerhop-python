@@ -91,6 +91,13 @@ async with AsyncLayerHop() as lh:
 | `checkout.products.get(id)` | `GET /v1/checkout/products/{id}` (public) |
 | `checkout.products.update(id, **fields)` | `PATCH /v1/checkout/products/{id}` (only the fields you pass) |
 | `checkout.products.start_session(id, *, reference, metadata)` | `POST /v1/checkout/products/{id}/sessions` (public) |
+| `checkout.refunds.create(session_id, *, amount, reason, from_, to)` | `POST /v1/checkout/sessions/{id}/refunds` |
+| `checkout.refunds.list(session_id)` | `GET /v1/checkout/sessions/{id}/refunds` |
+| `invoices.create(line_items, settle_chain, settle_token, recipient, *, customer_email, customer_name, merchant_name, memo, due_at, send)` | `POST /v1/invoices` |
+| `invoices.list(*, status, cursor, limit)` · `invoices.get(id)` · `invoices.update(id, **fields)` | `GET /v1/invoices` · `GET`/`PATCH /v1/invoices/{id}` |
+| `invoices.send(id)` · `invoices.void(id)` | `POST /v1/invoices/{id}/send` · `/void` |
+| `invoices.public_view(id)` · `invoices.pay(id)` | `GET /v1/invoices/{id}/public` · `POST /v1/invoices/{id}/pay` (public) |
+| `status()` | `GET /v1/status` (platform status, public) |
 | `webhooks.stream()` | `GET /v1/webhooks/stream` (SSE, API key) |
 | `webhooks.trigger(type)` | `POST /v1/webhooks/trigger` (test keys only) |
 
@@ -178,6 +185,48 @@ print(session["url"], session["productId"])
 
 `update` sends only the fields you pass; pass `None` to clear a nullable field such as
 `description`. Guide: https://docs.layerhop.com/guides/payment-buttons
+
+## Invoices
+
+Bill a customer by email for one or more line items; they pay with any token on the hosted page
+`https://layerhop.com/invoice/{id}` and get a receipt (with a PDF) once it is paid. `create`, `get`,
+`list`, `update`, `send` and `void` need an API key; `public_view` and `pay` are public.
+
+```python
+inv = lh.invoices.create(
+    [{"description": "Design work (hours)", "quantity": 10, "unitAmount": "80000000"}],  # 10 x 80 USDC
+    "base", "USDC", "0xYourPayoutAddress",
+    customer_email="ap@client.example", customer_name="Client Co", due_at="2026-11-01",
+    send=True,  # finalize and email now (otherwise it stays a draft you can update)
+)
+print(inv["number"], inv["url"])  # INV-0001 https://layerhop.com/invoice/inv_...
+
+lh.invoices.list(status="open")
+lh.invoices.send(inv["id"])   # re-sends the email of an open invoice
+lh.invoices.void(inv["id"])   # draft or open only
+# Fulfil on the invoice.paid webhook. Statuses: draft, open, paid, void.
+```
+
+## Refunds
+
+Refunds are non-custodial: you sign them from your own wallet. `create` returns a quote that you
+build, sign from `quote["from"]` (by default the session's payout address) and report; the refund
+goes back to the payer's original chain and token (`to="original"`, the default) or as the
+settlement token (`to="settlement"`). Leave out `amount` to refund everything not yet refunded.
+
+```python
+r = lh.checkout.refunds.create("cs_...", amount="10000000", reason="Partial refund")
+tx = lh.build_tx(r["quote"]["quoteId"])   # sign and broadcast from r["quote"]["from"]
+lh.report_submitted(r["quote"]["quoteId"], tx_hash)
+lh.checkout.refunds.list("cs_...")        # pending -> submitted -> completed (or failed)
+# The session's refundedAmount grows and checkout.session.refunded is sent.
+```
+
+## Platform status
+
+`lh.status()` (no arguments) returns `GET /v1/status`, the data behind status.layerhop.com:
+the overall `status` (`operational`, `degraded` or `outage`), each component with its 90-day uptime,
+and the last 14 days of incidents. `lh.status(provider, id)` is still the provider order status.
 
 ## Test mode
 
