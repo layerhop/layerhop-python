@@ -1,5 +1,7 @@
 # layerhop (Python SDK)
 
+[![PyPI](https://img.shields.io/pypi/v/layerhop?color=c3f06b&labelColor=090d15)](https://pypi.org/project/layerhop/) [![Python](https://img.shields.io/pypi/pyversions/layerhop?color=7ddec8&labelColor=090d15)](https://pypi.org/project/layerhop/) [![license](https://img.shields.io/pypi/l/layerhop?color=7ddec8&labelColor=090d15)](https://opensource.org/license/mit) [![docs](https://img.shields.io/badge/docs-docs.layerhop.com-7ddec8?labelColor=090d15)](https://docs.layerhop.com/sdks/python)
+
 Best-price cross-chain and same-chain swaps through one non-custodial API. Sync and async clients
 on top of [httpx](https://www.python-httpx.org/), mirroring the TypeScript `@layerhop/sdk`.
 
@@ -10,8 +12,6 @@ on top of [httpx](https://www.python-httpx.org/), mirroring the TypeScript `@lay
 
 ```bash
 pip install layerhop
-# from the monorepo:
-pip install -e sdks/python
 ```
 
 Python 3.9+. The only runtime dependency is `httpx`.
@@ -118,7 +118,6 @@ than 300 s (`tolerance`) are rejected; comparison is constant-time.
 ## Development
 
 ```bash
-cd sdks/python
 python3 -m venv .venv && .venv/bin/pip install -e '.[dev]'
 .venv/bin/python -m pytest
 ```
