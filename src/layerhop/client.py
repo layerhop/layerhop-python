@@ -49,7 +49,7 @@ from .types import (
 
 DEFAULT_BASE_URL = "https://api.layerhop.com"
 DEFAULT_TIMEOUT = 30.0
-__version__ = "0.5.0"
+__version__ = "0.5.1"
 
 
 def _seg(v: str) -> str:
