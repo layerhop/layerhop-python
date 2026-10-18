@@ -16,7 +16,8 @@ else:  # pragma: no cover
     from typing_extensions import NotRequired, TypedDict
 
 ProviderId = str
-"""``jupiter`` | ``relay`` | ``debridge`` | ``mayan`` | ``zerox`` | ``kyberswap`` | ``odos`` | ``lifi`` | ``mock``"""
+"""``jupiter`` | ``relay`` | ``debridge`` | ``mayan`` | ``zerox`` | ``kyberswap`` | ``odos`` | ``lifi`` | ``mock`` |
+``sandbox`` (every request made with an ``lh_test_`` key) | ``direct`` (a plain transfer, used by checkout)"""
 
 FeeChannel = Literal["web", "widget", "bot", "api"]
 OrderState = Literal["pending", "filled", "refunded", "failed", "unknown"]
@@ -68,6 +69,7 @@ class QuoteResponse(TypedDict):
     best: Quote
     quotes: List[Quote]
     errors: List[ProviderError]
+    livemode: NotRequired[bool]  # ``False`` when the request used an ``lh_test_`` key (sandbox quotes).
 
 
 class Approval(TypedDict):
@@ -83,12 +85,14 @@ class EvmTx(TypedDict):
     data: str
     value: str
     approval: NotRequired[Approval]
+    sandbox: NotRequired[bool]  # Test mode only: a placeholder that moves no funds. Never broadcast it.
 
 
 class SvmTx(TypedDict):
     vm: Literal["svm"]
     serializedTx: str
     submitViaApi: NotRequired[bool]
+    sandbox: NotRequired[bool]  # Test mode only: a placeholder that can never land. Never broadcast it.
 
 
 BuiltTx = Union[EvmTx, SvmTx]
@@ -146,6 +150,8 @@ class Order(TypedDict, total=False):
     dstAmount: str
     srcTxHash: str
     dstTxHash: str
+    livemode: bool  # ``False`` for test-mode orders.
+    checkoutSessionId: Optional[str]  # The checkout session this order pays, if any.
     createdAt: str
     updatedAt: str
 
@@ -153,6 +159,69 @@ class Order(TypedDict, total=False):
 class OrdersPage(TypedDict):
     orders: List[Order]
     nextCursor: NotRequired[Optional[str]]
+
+
+CheckoutStatus = Literal["open", "processing", "paid", "expired", "needs_review"]
+
+
+class CheckoutSettlement(TypedDict):
+    chainId: int
+    token: str
+    symbol: str
+    decimals: int
+
+
+class CheckoutPayment(TypedDict):
+    """The current (or final) payment attempt of a checkout session."""
+
+    quoteId: str
+    payer: Optional[str]
+    srcChainId: Optional[int]
+    srcToken: Optional[str]
+    srcAmount: Optional[str]
+    srcTxHash: Optional[str]
+    dstTxHash: Optional[str]
+    paidAt: Optional[str]
+
+
+class CheckoutSession(TypedDict):
+    id: str
+    object: Literal["checkout.session"]
+    livemode: bool
+    status: CheckoutStatus
+    statusDetail: NotRequired[Optional[str]]
+    amount: str
+    settlement: CheckoutSettlement
+    recipient: str
+    merchantName: NotRequired[Optional[str]]
+    description: NotRequired[Optional[str]]
+    url: str  # The hosted checkout page: send the payer here.
+    successUrl: NotRequired[Optional[str]]
+    cancelUrl: NotRequired[Optional[str]]
+    expiresAt: str
+    payment: Optional[CheckoutPayment]
+    reference: NotRequired[Optional[str]]  # Only with the owning account's API key.
+    metadata: NotRequired[Optional[Dict[str, str]]]  # Only with the owning account's API key.
+    createdAt: str
+    updatedAt: str
+
+
+class CheckoutSessionsPage(TypedDict):
+    sessions: List[CheckoutSession]
+    nextCursor: Optional[str]
+
+
+class CheckoutQuote(Quote):
+    srcAmount: str  # What the payer sends, base units of the chosen token.
+
+
+class CheckoutQuoteResponse(TypedDict):
+    sessionId: str
+    livemode: bool
+    amountDue: str
+    best: CheckoutQuote
+    quotes: List[CheckoutQuote]
+    errors: List[ProviderError]
 
 
 Json = Dict[str, Any]
