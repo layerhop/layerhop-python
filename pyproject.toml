@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "layerhop"
-version = "0.5.0"
+version = "0.5.1"
 description = "LayerHop SDK - best-price cross-chain and same-chain swaps (sync + async, httpx)"
 readme = "README.md"
 license = "MIT"
@@ -46,3 +46,7 @@ packages = ["src/layerhop"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.hatch.build.targets.sdist]
+# Ship only the package, tests and metadata (never local virtualenvs or caches).
+include = ["src", "tests", "README.md", "LICENSE", "CHANGELOG.md", "pyproject.toml"]
