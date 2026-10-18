@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import json as _json
 import time
-from typing import Any, AsyncIterator, Dict, Iterator, List, Optional, Union, overload
+from typing import Any, AsyncIterator, Dict, Iterator, List, Optional, Union
 from urllib.parse import quote as _urlquote
 
 import httpx
@@ -730,19 +730,13 @@ class LayerHop(_Base):
         """Build and dry-run the tx without recording an order."""
         return self._call("POST", "/simulate", json={"quoteId": quote_id})
 
-    @overload
-    def status(self) -> StatusResponse: ...
-    @overload
-    def status(self, provider: str, id: str) -> OrderStatus: ...
-
-    def status(self, provider: Optional[str] = None, id: Optional[str] = None) -> Any:
-        """``status()``: platform status (``GET /v1/status``, status.layerhop.com; public).
-        ``status(provider, id)``: a provider order's state."""
-        if provider is None:
-            return self._call("GET", "/status")
-        if id is None:
-            raise TypeError("status(provider, id) needs both arguments; call status() for the platform status")
+    def status(self, provider: str, id: str) -> OrderStatus:
+        """A provider order's state."""
         return self._call("GET", f"/orders/{_seg(provider)}/{_seg(id)}")
+
+    def service_status(self) -> StatusResponse:
+        """Platform status (``GET /v1/status``, shown at status.layerhop.com). Public."""
+        return self._call("GET", "/status")
 
     def list_orders(
         self, *, address: Optional[str] = None, status: Optional[str] = None,
@@ -848,17 +842,11 @@ class AsyncLayerHop(_Base):
     async def simulate(self, quote_id: str) -> SimulateResponse:
         return await self._call("POST", "/simulate", json={"quoteId": quote_id})
 
-    @overload
-    async def status(self) -> StatusResponse: ...
-    @overload
-    async def status(self, provider: str, id: str) -> OrderStatus: ...
-
-    async def status(self, provider: Optional[str] = None, id: Optional[str] = None) -> Any:
-        if provider is None:
-            return await self._call("GET", "/status")
-        if id is None:
-            raise TypeError("status(provider, id) needs both arguments; call status() for the platform status")
+    async def status(self, provider: str, id: str) -> OrderStatus:
         return await self._call("GET", f"/orders/{_seg(provider)}/{_seg(id)}")
+
+    async def service_status(self) -> StatusResponse:
+        return await self._call("GET", "/status")
 
     async def list_orders(
         self, *, address: Optional[str] = None, status: Optional[str] = None,
