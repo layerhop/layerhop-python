@@ -22,4 +22,4 @@ should run locally before opening a PR.
 
 ## Releases
 
-Bump `version` in `pyproject.toml`, then push a `vX.Y.Z` tag. `.github/workflows/release.yml` builds the sdist and wheel and publishes them to PyPI through trusted publishing (a PyPI trusted publisher for this repo, workflow `release.yml` and environment `pypi` must be configured). Local dev: `python -m venv .venv && . .venv/bin/activate && pip install -e ".[dev]" && pytest`.
+Bump `version` in `pyproject.toml`, then push a `vX.Y.Z` tag. `.github/workflows/release.yml` builds the sdist and wheel and publishes them to PyPI with the `PYPI_API_TOKEN` repository secret (or trusted publishing when no token is set); versions already on PyPI are skipped. Local dev: `python -m venv .venv && . .venv/bin/activate && pip install -e ".[dev]" && pytest`.

@@ -1,5 +1,6 @@
 name: Release
-# Builds and publishes to PyPI via trusted publishing (OIDC) when a version tag is pushed.
+# Builds and publishes to PyPI when a version tag is pushed: with the PYPI_API_TOKEN secret when it is
+# set, otherwise via trusted publishing (OIDC). A version that is already on PyPI is skipped.
 on:
   push:
     tags: ["v*"]
@@ -30,4 +31,11 @@ jobs:
         with:
           name: dist
           path: dist/
-      - uses: pypa/gh-action-pypi-publish@release/v1
+      - id: check
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          if curl -fsS "https://pypi.org/pypi/layerhop/$v/json" >/dev/null 2>&1; then echo "layerhop $v is already on PyPI"; echo "skip=true" >> "$GITHUB_OUTPUT"; fi
+      - if: steps.check.outputs.skip != 'true'
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
