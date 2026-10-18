@@ -18,6 +18,10 @@ from .types import (
     FINAL_STATES,
     BuiltTx,
     Chain,
+    CheckoutQuoteResponse,
+    CheckoutSession,
+    CheckoutSessionsPage,
+    CheckoutStatus,
     FeeChannel,
     OrdersPage,
     OrderStatus,
@@ -29,7 +33,7 @@ from .types import (
 
 DEFAULT_BASE_URL = "https://api.layerhop.com"
 DEFAULT_TIMEOUT = 30.0
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 
 def _seg(v: str) -> str:
@@ -94,6 +98,32 @@ class _Base:
         return p
 
     @staticmethod
+    def _checkout_create_body(
+        amount: str, settle_chain: Union[str, int], settle_token: str, recipient: str,
+        merchant_name: Optional[str], description: Optional[str], reference: Optional[str],
+        metadata: Optional[Dict[str, str]], success_url: Optional[str], cancel_url: Optional[str],
+        expires_in_minutes: Optional[int],
+    ) -> Dict[str, Any]:
+        if not isinstance(amount, str):
+            raise TypeError("amount must be an integer string in base units (e.g. '49000000')")
+        b: Dict[str, Any] = {
+            "amount": amount, "settleChain": str(settle_chain), "settleToken": settle_token, "recipient": recipient,
+        }
+        for k, v in (("merchantName", merchant_name), ("description", description), ("reference", reference),
+                     ("metadata", metadata), ("successUrl", success_url), ("cancelUrl", cancel_url),
+                     ("expiresInMinutes", expires_in_minutes)):
+            if v is not None:
+                b[k] = v
+        return b
+
+    @staticmethod
+    def _checkout_quote_body(src_chain: Union[str, int], src_token: str, sender: str, slippage_bps: Optional[int]) -> Dict[str, Any]:
+        b: Dict[str, Any] = {"srcChain": str(src_chain), "srcToken": src_token, "sender": sender}
+        if slippage_bps is not None:
+            b["slippageBps"] = slippage_bps
+        return b
+
+    @staticmethod
     def _handle(res: httpx.Response) -> Any:
         try:
             body = res.json()
@@ -111,6 +141,83 @@ class _Base:
             request_id=err.get("requestId") or res.headers.get("x-request-id"),
             docs_url=err.get("docsUrl"),
         )
+
+
+class Checkout:
+    """Checkout ("pay with any token"), as ``LayerHop.checkout``.
+
+    ``create``, ``list`` and ``expire`` need an API key; ``get`` and ``quote`` are public (the
+    payer's side). Pay a quote with ``build_tx`` + ``report_submitted`` as usual.
+    """
+
+    def __init__(self, client: "LayerHop") -> None:
+        self._c = client
+
+    def create(
+        self, amount: str, settle_chain: Union[str, int], settle_token: str, recipient: str, *,
+        merchant_name: Optional[str] = None, description: Optional[str] = None, reference: Optional[str] = None,
+        metadata: Optional[Dict[str, str]] = None, success_url: Optional[str] = None,
+        cancel_url: Optional[str] = None, expires_in_minutes: Optional[int] = None,
+    ) -> CheckoutSession:
+        """Create a session for ``amount`` (base units of the settlement token). Send the payer to ``url``."""
+        return self._c._call("POST", "/checkout/sessions", json=_Base._checkout_create_body(
+            amount, settle_chain, settle_token, recipient, merchant_name, description, reference, metadata,
+            success_url, cancel_url, expires_in_minutes))
+
+    def get(self, id: str) -> CheckoutSession:
+        """Public. Without the owner's API key, ``reference`` and ``metadata`` are omitted."""
+        return self._c._call("GET", f"/checkout/sessions/{_seg(id)}")
+
+    def list(
+        self, *, status: Optional[CheckoutStatus] = None, cursor: Optional[str] = None, limit: Optional[int] = None,
+    ) -> CheckoutSessionsPage:
+        """Your sessions of the key's mode (live or test), newest first. Pass ``nextCursor`` to page."""
+        return self._c._call("GET", "/checkout/sessions", params=_Base._orders_params(None, status, cursor, limit))
+
+    def expire(self, id: str) -> CheckoutSession:
+        """Cancel an ``open`` session so it can no longer be paid."""
+        return self._c._call("POST", f"/checkout/sessions/{_seg(id)}/expire", json={})
+
+    def quote(
+        self, id: str, src_chain: Union[str, int], src_token: str, *, sender: str, slippage_bps: Optional[int] = None,
+    ) -> CheckoutQuoteResponse:
+        """Public. Price paying the session with ``src_token`` on ``src_chain`` from ``sender``."""
+        return self._c._call("POST", f"/checkout/sessions/{_seg(id)}/quote",
+                             json=_Base._checkout_quote_body(src_chain, src_token, sender, slippage_bps))
+
+
+class AsyncCheckout:
+    """Checkout ("pay with any token"), as ``AsyncLayerHop.checkout``. Same methods as :class:`Checkout`."""
+
+    def __init__(self, client: "AsyncLayerHop") -> None:
+        self._c = client
+
+    async def create(
+        self, amount: str, settle_chain: Union[str, int], settle_token: str, recipient: str, *,
+        merchant_name: Optional[str] = None, description: Optional[str] = None, reference: Optional[str] = None,
+        metadata: Optional[Dict[str, str]] = None, success_url: Optional[str] = None,
+        cancel_url: Optional[str] = None, expires_in_minutes: Optional[int] = None,
+    ) -> CheckoutSession:
+        return await self._c._call("POST", "/checkout/sessions", json=_Base._checkout_create_body(
+            amount, settle_chain, settle_token, recipient, merchant_name, description, reference, metadata,
+            success_url, cancel_url, expires_in_minutes))
+
+    async def get(self, id: str) -> CheckoutSession:
+        return await self._c._call("GET", f"/checkout/sessions/{_seg(id)}")
+
+    async def list(
+        self, *, status: Optional[CheckoutStatus] = None, cursor: Optional[str] = None, limit: Optional[int] = None,
+    ) -> CheckoutSessionsPage:
+        return await self._c._call("GET", "/checkout/sessions", params=_Base._orders_params(None, status, cursor, limit))
+
+    async def expire(self, id: str) -> CheckoutSession:
+        return await self._c._call("POST", f"/checkout/sessions/{_seg(id)}/expire", json={})
+
+    async def quote(
+        self, id: str, src_chain: Union[str, int], src_token: str, *, sender: str, slippage_bps: Optional[int] = None,
+    ) -> CheckoutQuoteResponse:
+        return await self._c._call("POST", f"/checkout/sessions/{_seg(id)}/quote",
+                                   json=_Base._checkout_quote_body(src_chain, src_token, sender, slippage_bps))
 
 
 class LayerHop(_Base):
@@ -136,6 +243,7 @@ class LayerHop(_Base):
                          integrator_fee_bps=integrator_fee_bps, timeout=timeout)
         self._owns_client = http_client is None
         self._client = http_client or httpx.Client(timeout=timeout, transport=transport)
+        self.checkout = Checkout(self)
 
     def close(self) -> None:
         if self._owns_client:
@@ -227,6 +335,7 @@ class AsyncLayerHop(_Base):
                          integrator_fee_bps=integrator_fee_bps, timeout=timeout)
         self._owns_client = http_client is None
         self._client = http_client or httpx.AsyncClient(timeout=timeout, transport=transport)
+        self.checkout = AsyncCheckout(self)
 
     async def aclose(self) -> None:
         if self._owns_client:
