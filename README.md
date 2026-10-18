@@ -1,6 +1,6 @@
 # layerhop (Python SDK)
 
-[![PyPI](https://img.shields.io/pypi/v/layerhop?color=c3f06b&labelColor=090d15)](https://pypi.org/project/layerhop/) [![Python](https://img.shields.io/pypi/pyversions/layerhop?color=7ddec8&labelColor=090d15)](https://pypi.org/project/layerhop/) [![license](https://img.shields.io/pypi/l/layerhop?color=7ddec8&labelColor=090d15)](https://opensource.org/license/mit) [![docs](https://img.shields.io/badge/docs-docs.layerhop.com-7ddec8?labelColor=090d15)](https://docs.layerhop.com/sdks/python)
+[![PyPI](https://img.shields.io/pypi/v/layerhop?color=c3f06b&labelColor=090d15&cacheSeconds=3600)](https://pypi.org/project/layerhop/) [![Python](https://img.shields.io/pypi/pyversions/layerhop?color=7ddec8&labelColor=090d15)](https://pypi.org/project/layerhop/) [![license](https://img.shields.io/pypi/l/layerhop?color=7ddec8&labelColor=090d15)](https://opensource.org/license/mit) [![docs](https://img.shields.io/badge/docs-docs.layerhop.com-7ddec8?labelColor=090d15)](https://docs.layerhop.com/sdks/python)
 
 Best-price cross-chain and same-chain swaps through one non-custodial API. Sync and async clients
 on top of [httpx](https://www.python-httpx.org/), mirroring the TypeScript `@layerhop/sdk`.
