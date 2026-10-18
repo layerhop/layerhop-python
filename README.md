@@ -78,19 +78,44 @@ async with AsyncLayerHop() as lh:
 | `report_submitted(quote_id, tx_hash)` | `POST /v1/orders/{quoteId}/submitted` |
 | `status(provider, id)` | `GET /v1/orders/{provider}/{id}` |
 | `watch(provider, id, *, interval=3.0, timeout=1800)` | polls `status`, yields on change, stops when final |
+| `stream_order(quote_id)` | `GET /v1/orders/{quoteId}/events` (SSE), yields the order until final |
 | `list_orders(*, address, status, cursor, limit)` | `GET /v1/orders` |
 | `checkout.create(amount, settle_chain, settle_token, recipient, *, merchant_name, description, reference, metadata, success_url, cancel_url, expires_in_minutes)` | `POST /v1/checkout/sessions` |
 | `checkout.list(*, status, cursor, limit)` | `GET /v1/checkout/sessions` |
 | `checkout.get(id)` | `GET /v1/checkout/sessions/{id}` (public) |
 | `checkout.expire(id)` | `POST /v1/checkout/sessions/{id}/expire` |
 | `checkout.quote(id, src_chain, src_token, *, sender, slippage_bps=None)` | `POST /v1/checkout/sessions/{id}/quote` (public) |
+| `checkout.stream(id)` | `GET /v1/checkout/sessions/{id}/events` (SSE, public) |
+| `webhooks.stream()` | `GET /v1/webhooks/stream` (SSE, API key) |
+| `webhooks.trigger(type)` | `POST /v1/webhooks/trigger` (test keys only) |
 
 Client options: `base_url` (default `https://api.layerhop.com`), `api_key` (sent as `x-api-key`),
-`channel` (default `"api"`), `integrator`, `integrator_fee_bps`, `timeout`, and `http_client` /
+`channel` (default `"api"`), `integrator`, `integrator_fee_bps`, `timeout`, `stream_timeout` (read
+timeout of streams; `None`, the default, waits forever), and `http_client` /
 `transport` for custom httpx setups or tests.
 
 Responses are plain dicts typed with `TypedDict` (keys keep the API's camelCase), so new fields
 never break you.
+
+## Live order status
+
+`stream_order` follows an order over Server-Sent Events instead of polling: it yields the order
+now and on every change, and ends once it is final (`filled`, `refunded`, `failed` or `expired`).
+`checkout.stream(id)` does the same for a checkout session (until `paid`, `expired` or
+`needs_review`).
+
+```python
+for order in lh.stream_order(best["quoteId"]):
+    print(order["status"], order.get("dstTxHash"))
+
+# async
+async for session in alh.checkout.stream(session_id):
+    print(session["status"])
+```
+
+The request is sent when iteration starts; break out of the loop to close the connection. A
+missing order raises `LayerHopApiError` (`ORDER_NOT_FOUND`). Guide:
+https://docs.layerhop.com/guides/live-status
 
 ## Checkout (pay with any token)
 
@@ -161,6 +186,19 @@ event = construct_webhook_event(secret, request.get_data(), request.headers.get(
 
 The header is `t=<unix>,v1=<hex HMAC-SHA256(secret, "<t>.<body>")>`. Signatures older or newer
 than 300 s (`tolerance`) are rejected; comparison is constant-time.
+
+### Webhook tools
+
+With an API key, `webhooks.stream()` yields your account's webhook events (in the key's live or
+test mode) as they are created, with the exact payloads your endpoints receive. `webhooks.trigger`
+creates a sample event in test mode (test keys only; a live key raises `FORBIDDEN`).
+
+```python
+lh = LayerHop(api_key="lh_test_...")
+r = lh.webhooks.trigger("order.filled")  # {"eventId", "deliveries", "payload"}
+for event in lh.webhooks.stream():       # runs until you break (or the server closes it)
+    print(event["type"], event["data"])
+```
 
 ## Development
 

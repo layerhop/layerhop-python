@@ -3,7 +3,7 @@
 The SDK never holds private keys: it returns unsigned transactions for your own wallet to sign.
 """
 
-from .client import DEFAULT_BASE_URL, AsyncCheckout, AsyncLayerHop, Checkout, LayerHop, __version__
+from .client import DEFAULT_BASE_URL, AsyncCheckout, AsyncLayerHop, AsyncWebhooks, Checkout, LayerHop, Webhooks, __version__
 from .errors import LayerHopApiError, WebhookSignatureError
 from .types import (
     FINAL_STATES,
@@ -33,6 +33,9 @@ from .types import (
     SimulateResponse,
     SvmTx,
     Token,
+    TriggerWebhookResponse,
+    WebhookEvent,
+    WebhookEventType,
 )
 from .webhooks import (
     SIGNATURE_HEADER,
@@ -46,12 +49,12 @@ EVM_NATIVE = "0x0000000000000000000000000000000000000000"
 SOL_NATIVE = "So11111111111111111111111111111111111111112"
 
 __all__ = [
-    "LayerHop", "AsyncLayerHop", "Checkout", "AsyncCheckout", "LayerHopApiError", "WebhookSignatureError", "DEFAULT_BASE_URL", "__version__",
+    "LayerHop", "AsyncLayerHop", "Checkout", "AsyncCheckout", "Webhooks", "AsyncWebhooks", "LayerHopApiError", "WebhookSignatureError", "DEFAULT_BASE_URL", "__version__",
     "verify_webhook_signature", "construct_webhook_event", "compute_webhook_signature", "SIGNATURE_HEADER",
     "SOLANA_CHAIN_ID", "EVM_NATIVE", "SOL_NATIVE", "FINAL_STATES",
     "Approval", "BuiltTx", "Chain", "EvmTx", "FeeBreakdown", "FeeChannel", "Order", "OrdersPage", "OrderState",
     "OrderStatus", "ProviderError", "ProviderId", "Quote", "QuoteResponse", "ReportSubmittedResponse",
     "SimulateError", "SimulateResponse", "SvmTx", "Token",
     "CheckoutPayment", "CheckoutQuote", "CheckoutQuoteResponse", "CheckoutSession", "CheckoutSessionsPage",
-    "CheckoutSettlement", "CheckoutStatus",
+    "CheckoutSettlement", "CheckoutStatus", "TriggerWebhookResponse", "WebhookEvent", "WebhookEventType",
 ]

@@ -224,4 +224,28 @@ class CheckoutQuoteResponse(TypedDict):
     errors: List[ProviderError]
 
 
+WebhookEventType = Literal[
+    "order.submitted", "order.filled", "order.refunded", "order.failed",
+    "checkout.session.processing", "checkout.session.completed", "checkout.session.payment_failed",
+    "checkout.session.expired",
+]
+
+
+class WebhookEvent(TypedDict):
+    """The JSON body LayerHop POSTs to your webhook endpoints (and ``webhooks.stream()`` yields)."""
+
+    id: str
+    type: str  # A :data:`WebhookEventType`, or ``webhook.test``.
+    livemode: bool
+    sample: NotRequired[bool]  # Present on samples from the dashboard or ``webhooks.trigger``.
+    createdAt: str
+    data: Dict[str, Any]  # ``{"order": Order}`` or ``{"session": CheckoutSession}``.
+
+
+class TriggerWebhookResponse(TypedDict):
+    eventId: str
+    deliveries: int  # Test endpoints the event was queued for.
+    payload: WebhookEvent
+
+
 Json = Dict[str, Any]
