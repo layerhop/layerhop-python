@@ -71,3 +71,12 @@ CHECKOUT_QUOTE_RESPONSE = {
     "best": CHECKOUT_QUOTE, "quotes": [CHECKOUT_QUOTE],
     "errors": [{"provider": "lifi", "code": "PROVIDER_TIMEOUT", "message": "Timed out"}],
 }
+CHECKOUT_PRODUCT = {
+    "id": "prod_01m57hq2c4x8q6r0v3b5n7p9d", "object": "checkout.product", "livemode": True, "active": True,
+    "name": "Pro plan", "description": "1 month", "merchantName": None, "amount": "49000000",
+    "settlement": {"chainId": 8453, "token": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", "symbol": "USDC", "decimals": 6},
+    "url": "https://layerhop.com/buy/prod_01m57hq2c4x8q6r0v3b5n7p9d",
+    "recipient": "0x2222222222222222222222222222222222222222", "successUrl": "https://shop.example.com/thanks",
+    "cancelUrl": None, "expiresInMinutes": 60, "allowedOrigins": ["https://shop.example.com"],
+    "createdAt": "2026-10-18T10:00:00.000Z", "updatedAt": "2026-10-18T10:00:00.000Z",
+}
