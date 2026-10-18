@@ -97,7 +97,7 @@ async with AsyncLayerHop() as lh:
 | `invoices.list(*, status, cursor, limit)` · `invoices.get(id)` · `invoices.update(id, **fields)` | `GET /v1/invoices` · `GET`/`PATCH /v1/invoices/{id}` |
 | `invoices.send(id)` · `invoices.void(id)` | `POST /v1/invoices/{id}/send` · `/void` |
 | `invoices.public_view(id)` · `invoices.pay(id)` | `GET /v1/invoices/{id}/public` · `POST /v1/invoices/{id}/pay` (public) |
-| `status()` | `GET /v1/status` (platform status, public) |
+| `service_status()` | `GET /v1/status` (platform status, public) |
 | `webhooks.stream()` | `GET /v1/webhooks/stream` (SSE, API key) |
 | `webhooks.trigger(type)` | `POST /v1/webhooks/trigger` (test keys only) |
 
@@ -224,7 +224,7 @@ lh.checkout.refunds.list("cs_...")        # pending -> submitted -> completed (o
 
 ## Platform status
 
-`lh.status()` (no arguments) returns `GET /v1/status`, the data behind status.layerhop.com:
+`lh.service_status()` returns `GET /v1/status`, the data behind status.layerhop.com:
 the overall `status` (`operational`, `degraded` or `outage`), each component with its 90-day uptime,
 and the last 14 days of incidents. `lh.status(provider, id)` is still the provider order status.
 

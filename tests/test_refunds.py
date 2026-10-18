@@ -69,13 +69,13 @@ def test_platform_status_and_order_status(api):
     api.on("GET", "/v1/status", STATUS)
     api.on("GET", "/v1/orders/mock/1", {"provider": "mock", "id": "1", "state": "filled"})
     lh = make(api)
-    s = lh.status()
+    s = lh.service_status()
     assert api.last.url.raw_path.decode() == "/v1/status" and "x-api-key" not in api.last.headers
     assert s["status"] == "degraded" and s["components"][0]["uptime90d"] == 99.98
     assert s["components"][1]["uptime90d"] is None and s["incidents"][0]["resolvedAt"] is None
     assert lh.status("mock", "1")["state"] == "filled"
     with pytest.raises(TypeError):
-        lh.status("mock")  # type: ignore[call-overload]
+        lh.status("mock")  # type: ignore[call-arg]
 
 
 def test_refunded_session_and_order_fields(api):
@@ -95,4 +95,4 @@ async def test_async_refunds_and_status(api):
         r = await lh.checkout.refunds.create(SID, amount="10000000", to="original")
         assert api.last_json() == {"amount": "10000000", "to": "original"} and r["refund"]["id"] == REFUND["id"]
         assert (await lh.checkout.refunds.list(SID))[0]["amount"] == "10000000"
-        assert (await lh.status())["url"] == "https://layerhop.com/status"
+        assert (await lh.service_status())["url"] == "https://layerhop.com/status"
