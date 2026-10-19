@@ -127,3 +127,31 @@ DEPOSIT_ORDER = {
     "depositAddressId": "da_01m5f3k2c4x8q6r0v3b5n7p9d", "keyId": "key_1", "partnerId": None, "partnerFeeEstimate": "0",
     "createdAt": "2026-10-19T10:05:00.000Z", "updatedAt": "2026-10-19T10:05:00.000Z",
 }
+SUBSCRIPTION = {
+    "id": "sub_01k7v0c2c4x8q6r0v3b5n7p9d", "object": "subscription", "livemode": False, "status": "active",
+    "customerEmail": "ada@example.com", "customerName": "Ada Lovelace", "merchantName": "Studio Nine",
+    "description": "Pro plan", "memo": None, "productId": None, "amount": "49000000",
+    "settlement": {"chainId": 8453, "token": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", "symbol": "USDC", "decimals": 6},
+    "recipient": "0x2222222222222222222222222222222222222222", "interval": "month", "intervalCount": 1,
+    "daysUntilDue": 3, "currentPeriodStart": "2026-10-18T10:00:00.000Z", "currentPeriodEnd": "2026-11-18T10:00:00.000Z",
+    "nextInvoiceAt": "2026-11-18T10:00:00.000Z", "cancelAt": None, "cancelAtPeriodEnd": False, "canceledAt": None,
+    "cancellationReason": None, "pausedAt": None, "latestInvoiceId": "inv_01m5c2q2c4x8q6r0v3b5n7p9d",
+    "metadata": {"plan": "pro"}, "createdAt": "2026-10-18T10:00:00.000Z", "updatedAt": "2026-10-18T10:00:00.000Z",
+}
+LIMIT_ORDER = {
+    "id": "lo_01m5h8r2c4x8q6r0v3b5n7p9d", "object": "limit_order", "livemode": False, "status": "built",
+    "statusDetail": None, "provider": "sandbox", "chainId": 7565164,
+    "wallet": "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM",
+    "srcToken": "So11111111111111111111111111111111111111112",
+    "dstToken": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", "amount": "1000000000", "dstAmount": "200000000",
+    "expiresAt": None, "fees": {"ourFeeBps": 20, "integratorFeeBps": 0, "integrator": None},
+    "providerOrderId": "3kVb1sZ8d6qW2nE4rT7yU9iO0pA5sD3fG6hJ8kL1zX2c", "filledAmount": "0", "filledDstAmount": "0",
+    "fillCount": 0, "openTxHash": None, "cancelTxHash": None, "channel": "api", "metadata": {"userId": "42"},
+    "createdAt": "2026-10-19T10:00:00.000Z", "updatedAt": "2026-10-19T10:00:00.000Z",
+}
+LIMIT_ORDER_FILL = {
+    **DEPOSIT_ORDER, "quoteId": "lof_7a1c2e3d4b5a6c7d8e9f0a1b2c3d4e5f", "srcChainId": 7565164, "dstChainId": 7565164,
+    "srcToken": LIMIT_ORDER["srcToken"], "dstToken": LIMIT_ORDER["dstToken"], "amount": "1000000000",
+    "dstAmount": "200000000", "status": "filled", "depositAddressId": None, "limitOrderId": LIMIT_ORDER["id"],
+}
+SVM_TX = {"vm": "svm", "serializedTx": "AQAAAA==", "submitViaApi": True, "sandbox": True}

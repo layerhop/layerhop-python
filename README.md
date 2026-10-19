@@ -71,7 +71,7 @@ async with AsyncLayerHop() as lh:
 | `health()` | `GET /v1/health` |
 | `chains()` | `GET /v1/chains` |
 | `tokens(chain)` | `GET /v1/tokens?chain=` |
-| `quote(src_chain, src_token, amount, dst_chain, dst_token, *, sender, recipient, slippage_bps=50)` | `GET /v1/quote` |
+| `quote(src_chain, src_token, amount, dst_chain, dst_token, *, sender, recipient, slippage_bps=50, gas_on_arrival=None)` | `GET /v1/quote` |
 | `build_tx(quote_id)` | `POST /v1/orders` → the `tx` |
 | `simulate(quote_id)` | `POST /v1/simulate` (dry-run, records nothing) |
 | `submit(quote_id, signed_transaction)` | `POST /v1/orders/submit` (Solana `submitViaApi` only) |
@@ -97,10 +97,19 @@ async with AsyncLayerHop() as lh:
 | `invoices.list(*, status, cursor, limit)` · `invoices.get(id)` · `invoices.update(id, **fields)` | `GET /v1/invoices` · `GET`/`PATCH /v1/invoices/{id}` |
 | `invoices.send(id)` · `invoices.void(id)` | `POST /v1/invoices/{id}/send` · `/void` |
 | `invoices.public_view(id)` · `invoices.pay(id)` | `GET /v1/invoices/{id}/public` · `POST /v1/invoices/{id}/pay` (public) |
+| `subscriptions.create(customer_email, interval, *, interval_count, product_id, amount, settle_chain, settle_token, recipient, description, customer_name, merchant_name, memo, days_until_due, start_at, metadata)` | `POST /v1/subscriptions` |
+| `subscriptions.list(*, status, customer_email, cursor, limit)` · `subscriptions.get(id)` · `subscriptions.update(id, **fields)` | `GET /v1/subscriptions` · `GET`/`PATCH /v1/subscriptions/{id}` |
+| `subscriptions.cancel(id, *, at_period_end)` · `subscriptions.pause(id)` · `subscriptions.resume(id)` | `POST /v1/subscriptions/{id}/cancel` · `/pause` · `/resume` |
+| `subscriptions.invoices(id)` | `GET /v1/subscriptions/{id}/invoices` → the `invoices` |
 | `deposit_addresses.create(src_chain, src_token, dst_chain, dst_token, recipient, refund_to, *, reusable, amount, label, metadata, integrator, integrator_fee_bps)` | `POST /v1/deposit-addresses` |
 | `deposit_addresses.list(*, status, label, cursor, limit)` · `deposit_addresses.get(id)` | `GET /v1/deposit-addresses` · `GET /v1/deposit-addresses/{id}` |
 | `deposit_addresses.refresh(id)` · `deposit_addresses.disable(id)` | `POST /v1/deposit-addresses/{id}/refresh` · `/disable` |
 | `deposit_addresses.simulate(id, amount)` | `POST /v1/deposit-addresses/{id}/simulate` (test keys only) |
+| `limit_orders.create(wallet, src_token, dst_token, amount, dst_amount, *, expires_at, chain, metadata, integrator, integrator_fee_bps)` | `POST /v1/limit-orders` |
+| `limit_orders.submit(id, signed_transaction)` | `POST /v1/limit-orders/{id}/submit` |
+| `limit_orders.list(*, wallet, status, cursor, limit)` · `limit_orders.get(id)` | `GET /v1/limit-orders` · `GET /v1/limit-orders/{id}` |
+| `limit_orders.cancel(id)` | `POST /v1/limit-orders/{id}/cancel` |
+| `limit_orders.simulate(id, outcome)` | `POST /v1/limit-orders/{id}/simulate` (test keys only) |
 | `service_status()` | `GET /v1/status` (platform status, public) |
 | `webhooks.stream()` | `GET /v1/webhooks/stream` (SSE, API key) |
 | `webhooks.trigger(type)` | `POST /v1/webhooks/trigger` (test keys only) |
@@ -112,6 +121,22 @@ timeout of streams; `None`, the default, waits forever), and `http_client` /
 
 Responses are plain dicts typed with `TypedDict` (keys keep the API's camelCase), so new fields
 never break you.
+
+### Gas on arrival
+
+Pass `gas_on_arrival=True` to also deliver $2 of native gas to the recipient on the destination
+chain, or a USD amount from 0.5 to 20 (`gas_on_arrival=5`). Quotes that include it carry
+`gasOnArrival` (`amount`, `token`, `symbol`, `decimals`, `usd`); its cost is already taken out of
+`dstAmount`. It is ignored for same-chain swaps, non-EVM destinations and native outputs, and
+providers that can't do it ignore it, so check the quote.
+
+```python
+q = lh.quote("solana", "USDC", "100000000", "base", "USDC",
+             sender="YourSolanaAddress", recipient="0xYourEvmAddress", gas_on_arrival=True)
+goa = q["best"].get("gasOnArrival")
+if goa:
+    print(goa["amount"], goa["symbol"], goa.get("usd"))  # e.g. 800000000000000 ETH 2.0
+```
 
 ## Live order status
 
@@ -211,6 +236,33 @@ lh.invoices.void(inv["id"])   # draft or open only
 # Fulfil on the invoice.paid webhook. Statuses: draft, open, paid, void.
 ```
 
+## Subscriptions
+
+Recurring billing. Crypto can't be pulled from a wallet, so LayerHop issues and emails an invoice
+every period and the customer pays it with any token. Unpaid past the due date, the subscription
+turns `past_due` (reminders on day 1 and 3) and is canceled after 7 days. Everything needs an API key.
+
+```python
+sub = lh.subscriptions.create(
+    "ada@example.com", "month",  # interval: day, week, month or year
+    amount="49000000", settle_chain="base", settle_token="USDC", recipient="0xYourPayoutAddress",
+    description="Pro plan",      # or product_id="prod_..." instead of these five
+    interval_count=1, days_until_due=3,
+)
+print(sub["status"], sub["nextInvoiceAt"])
+
+lh.subscriptions.update(sub["id"], amount="59000000")         # applies from the next invoice
+lh.subscriptions.cancel(sub["id"], at_period_end=True)         # or cancel(id) to cancel now
+lh.subscriptions.update(sub["id"], cancel_at_period_end=False)  # undo the scheduled cancel
+lh.subscriptions.pause(sub["id"]); lh.subscriptions.resume(sub["id"])
+lh.subscriptions.invoices(sub["id"])  # its invoices (with subscriptionId), newest first
+lh.subscriptions.list(status="past_due")
+```
+
+Statuses: `active`, `past_due`, `paused`, `canceled`. Webhooks: `subscription.created`,
+`subscription.renewed` (a period's invoice was issued, with `data.invoice`), `subscription.past_due`
+and `subscription.canceled`; the period invoices send the usual `invoice.paid`.
+
 ## Deposit addresses
 
 Let a user swap or bridge by just **sending** tokens to an address: no wallet connection, no
@@ -236,6 +288,35 @@ Live mode may be disabled by the operator: `create` with a live key then raises 
 `LayerHopApiError` with code `FORBIDDEN`. Test keys always work, and
 `lh.deposit_addresses.simulate(da["id"], "25000000")` records a test deposit that settles like any
 test order. Deposits under $1 may not be processed.
+
+## Limit orders (Solana)
+
+Sell a token at your price or better (Jupiter Trigger, beta). The order lives on chain; the user's
+wallet signs it and keeps custody. Each fill becomes an order with `limitOrderId` set. An API key is
+optional (without one, `list` needs `wallet`).
+
+```python
+lo = lh.limit_orders.create(
+    "UserSolanaWallet", "SOL", "USDC",
+    "1000000000", "200000000",  # sell 1 SOL for at least 200 USDC (worth at least $5)
+    expires_at=None,            # unix seconds, or None for good-till-cancelled
+)
+# lo["tx"]["serializedTx"]: base64 VersionedTransaction. Only SIGN it (submitViaApi), then:
+r = lh.limit_orders.submit(lo["id"], signed_b64)  # {"limitOrder": {... "status": "open"}, "txHash"}
+
+lh.limit_orders.get(lo["id"])["fills"]            # its fills (orders), newest first
+lh.limit_orders.list(wallet="UserSolanaWallet", status="open")
+c = lh.limit_orders.cancel(lo["id"])               # c["tx"]: sign and submit it the same way
+                                                   # (None when the order was never submitted)
+```
+
+Statuses: `built`, `open`, `filled`, `cancelled`, `expired`, `failed`. Webhooks: `limit_order.opened`,
+`limit_order.filled` (with the fill in `data.fill`), `limit_order.cancelled`, `limit_order.expired`,
+`limit_order.failed`. Our fee applies when `dst_token` is SOL, USDC or USDT.
+
+Live mode may be disabled by the operator: `create` with a live key (or no key) then raises a
+`LayerHopApiError` with code `FORBIDDEN`. Test keys always work, and
+`lh.limit_orders.simulate(lo["id"], "fill")` (or `"partial_fill"`, `"expire"`) settles an open test order.
 
 ## Refunds
 

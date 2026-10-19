@@ -26,6 +26,7 @@ from .types import (
     CheckoutSessionsPage,
     CheckoutStatus,
     CreatedDepositAddress,
+    CreatedLimitOrder,
     DepositAddress,
     DepositAddressesPage,
     DepositAddressStatus,
@@ -36,6 +37,13 @@ from .types import (
     InvoicePayResponse,
     InvoicesPage,
     InvoiceStatus,
+    LimitOrder,
+    LimitOrderCancelResponse,
+    LimitOrderOutcome,
+    LimitOrdersPage,
+    LimitOrderStatus,
+    LimitOrderSubmitResponse,
+    LimitOrderWithFills,
     Order,
     OrdersPage,
     OrderStatus,
@@ -47,6 +55,10 @@ from .types import (
     SimulateDepositResponse,
     SimulateResponse,
     StatusResponse,
+    Subscription,
+    SubscriptionInterval,
+    SubscriptionsPage,
+    SubscriptionStatus,
     Token,
     TriggerWebhookResponse,
     WebhookEvent,
@@ -137,6 +149,7 @@ class _Base:
     def _quote_params(
         self, src_chain: Union[str, int], src_token: str, amount: str, dst_chain: Union[str, int],
         dst_token: str, sender: str, recipient: str, slippage_bps: int,
+        gas_on_arrival: Union[bool, float, None] = None,
     ) -> Dict[str, str]:
         if not isinstance(amount, str):
             raise TypeError("amount must be an integer string in base units (e.g. '100000000')")
@@ -149,6 +162,11 @@ class _Base:
             q["integrator"] = self.integrator
         if self.integrator_fee_bps is not None:
             q["integratorFeeBps"] = str(self.integrator_fee_bps)
+        if isinstance(gas_on_arrival, bool):
+            if gas_on_arrival:
+                q["gasOnArrival"] = "true"
+        elif gas_on_arrival is not None:
+            q["gasOnArrivalUsd"] = format(gas_on_arrival, "g")
         return q
 
     @staticmethod
@@ -287,6 +305,70 @@ class _Base:
         p = _Base._orders_params(None, status, cursor, limit)
         if label:
             p["label"] = label
+        return p
+
+    @staticmethod
+    def _subscription_body(fields: Dict[str, Any], *, skip: Any) -> Dict[str, Any]:
+        """camelCase subscription body from snake_case arguments, leaving out values that are ``skip``."""
+        amount = fields.get("amount", skip)
+        if amount is not skip and amount is not None and not isinstance(amount, str):
+            raise TypeError("amount must be an integer string in base units (e.g. '49000000')")
+        names = {
+            "customer_email": "customerEmail", "interval": "interval", "interval_count": "intervalCount",
+            "product_id": "productId", "amount": "amount", "settle_chain": "settleChain",
+            "settle_token": "settleToken", "recipient": "recipient", "description": "description",
+            "customer_name": "customerName", "merchant_name": "merchantName", "memo": "memo",
+            "days_until_due": "daysUntilDue", "start_at": "startAt", "metadata": "metadata",
+            "cancel_at_period_end": "cancelAtPeriodEnd",
+        }
+        b: Dict[str, Any] = {}
+        for k, key in names.items():
+            v = fields.get(k, skip)
+            if v is skip:
+                continue
+            b[key] = str(v) if k == "settle_chain" and v is not None else v
+        return b
+
+    @staticmethod
+    def _subscription_list_params(
+        status: Optional[str], customer_email: Optional[str], cursor: Optional[str], limit: Optional[int],
+    ) -> Dict[str, str]:
+        p = _Base._orders_params(None, status, cursor, limit)
+        if customer_email:
+            p["customerEmail"] = customer_email
+        return p
+
+    @staticmethod
+    def _subscription_cancel_body(at_period_end: Optional[bool]) -> Dict[str, Any]:
+        return {} if at_period_end is None else {"atPeriodEnd": at_period_end}
+
+    def _limit_order_body(
+        self, wallet: str, src_token: str, dst_token: str, amount: str, dst_amount: str,
+        expires_at: Optional[int], chain: Union[str, int, None], metadata: Optional[Dict[str, str]],
+        integrator: Optional[str], integrator_fee_bps: Optional[int],
+    ) -> Dict[str, Any]:
+        if not isinstance(amount, str) or not isinstance(dst_amount, str):
+            raise TypeError("amount and dst_amount must be integer strings in base units (e.g. '100000000')")
+        b: Dict[str, Any] = {
+            "channel": self.channel, "wallet": wallet, "srcToken": src_token, "dstToken": dst_token,
+            "amount": amount, "dstAmount": dst_amount,
+        }
+        integrator = integrator if integrator is not None else self.integrator
+        integrator_fee_bps = integrator_fee_bps if integrator_fee_bps is not None else self.integrator_fee_bps
+        for k, v in (("expiresAt", expires_at), ("chain", None if chain is None else str(chain)),
+                     ("metadata", metadata), ("integrator", integrator), ("integratorFeeBps", integrator_fee_bps)):
+            if v is not None:
+                b[k] = v
+        return b
+
+    @staticmethod
+    def _limit_order_list_params(
+        wallet: Optional[str], status: Optional[str], cursor: Optional[str], limit: Optional[int],
+    ) -> Dict[str, str]:
+        p: Dict[str, str] = {}
+        if wallet:
+            p["wallet"] = wallet
+        p.update(_Base._orders_params(None, status, cursor, limit))
         return p
 
     @staticmethod
@@ -556,6 +638,219 @@ class AsyncInvoices:
         return await self._c._call("POST", f"/invoices/{_seg(id)}/pay", json={})
 
 
+class Subscriptions:
+    """Subscriptions, as ``LayerHop.subscriptions`` (API key): recurring billing. Crypto can't be
+    pulled from a wallet, so LayerHop issues and emails an invoice every period and the customer pays
+    it with any token. Unpaid past the due date -> ``past_due`` with reminders (day 1 and 3), canceled
+    after 7 days. Webhooks: ``subscription.created`` / ``renewed`` / ``past_due`` / ``canceled``.
+    """
+
+    def __init__(self, client: "LayerHop") -> None:
+        self._c = client
+
+    def create(
+        self, customer_email: str, interval: SubscriptionInterval, *, interval_count: Optional[int] = None,
+        product_id: Optional[str] = None, amount: Optional[str] = None, settle_chain: Union[str, int, None] = None,
+        settle_token: Optional[str] = None, recipient: Optional[str] = None, description: Optional[str] = None,
+        customer_name: Optional[str] = None, merchant_name: Optional[str] = None, memo: Optional[str] = None,
+        days_until_due: Optional[int] = None, start_at: Optional[str] = None, metadata: Optional[Dict[str, str]] = None,
+    ) -> Subscription:
+        """Create a subscription billed every ``interval_count`` (default 1) ``interval`` units. Pass either
+        ``product_id`` (bills the product's price, token and payout address) or ``amount``,
+        ``settle_chain``, ``settle_token``, ``recipient`` and ``description``. ``start_at`` (ISO
+        date-time, default now) is when the first period starts and its invoice is issued."""
+        return self._c._call("POST", "/subscriptions", json=_Base._subscription_body(dict(
+            customer_email=customer_email, interval=interval, interval_count=interval_count, product_id=product_id,
+            amount=amount, settle_chain=settle_chain, settle_token=settle_token, recipient=recipient,
+            description=description, customer_name=customer_name, merchant_name=merchant_name, memo=memo,
+            days_until_due=days_until_due, start_at=start_at, metadata=metadata), skip=None))
+
+    def get(self, id: str) -> Subscription:
+        return self._c._call("GET", f"/subscriptions/{_seg(id)}")
+
+    def list(
+        self, *, status: Optional[SubscriptionStatus] = None, customer_email: Optional[str] = None,
+        cursor: Optional[str] = None, limit: Optional[int] = None,
+    ) -> SubscriptionsPage:
+        """Your subscriptions of the key's mode (live or test), newest first. Pass ``nextCursor`` to page."""
+        return self._c._call("GET", "/subscriptions",
+                             params=_Base._subscription_list_params(status, customer_email, cursor, limit))
+
+    def update(
+        self, id: str, *, customer_email: Any = _UNSET, customer_name: Any = _UNSET, merchant_name: Any = _UNSET,
+        description: Any = _UNSET, memo: Any = _UNSET, amount: Any = _UNSET, days_until_due: Any = _UNSET,
+        metadata: Any = _UNSET, cancel_at_period_end: Any = _UNSET,
+    ) -> Subscription:
+        """Change only the fields you pass (``None`` clears a nullable field); applies from the next
+        invoice. ``cancel_at_period_end=False`` undoes a scheduled cancel."""
+        return self._c._call("PATCH", f"/subscriptions/{_seg(id)}", json=_Base._subscription_body(dict(
+            customer_email=customer_email, customer_name=customer_name, merchant_name=merchant_name,
+            description=description, memo=memo, amount=amount, days_until_due=days_until_due, metadata=metadata,
+            cancel_at_period_end=cancel_at_period_end), skip=_UNSET))
+
+    def cancel(self, id: str, *, at_period_end: Optional[bool] = None) -> Subscription:
+        """Cancel now (default: no more invoices, ``subscription.canceled``) or at the end of the
+        current period (``at_period_end=True``)."""
+        return self._c._call("POST", f"/subscriptions/{_seg(id)}/cancel",
+                             json=_Base._subscription_cancel_body(at_period_end))
+
+    def pause(self, id: str) -> Subscription:
+        """Active only: no invoices or reminders until resumed."""
+        return self._c._call("POST", f"/subscriptions/{_seg(id)}/pause", json={})
+
+    def resume(self, id: str) -> Subscription:
+        """Paused only: continues the paid period's schedule, or starts a new period now."""
+        return self._c._call("POST", f"/subscriptions/{_seg(id)}/resume", json={})
+
+    def invoices(self, id: str) -> List[Invoice]:
+        """The invoices issued for the subscription (up to 100), newest first."""
+        return self._c._call("GET", f"/subscriptions/{_seg(id)}/invoices")["invoices"]
+
+
+class AsyncSubscriptions:
+    """Subscriptions, as ``AsyncLayerHop.subscriptions``. Same methods as :class:`Subscriptions`."""
+
+    def __init__(self, client: "AsyncLayerHop") -> None:
+        self._c = client
+
+    async def create(
+        self, customer_email: str, interval: SubscriptionInterval, *, interval_count: Optional[int] = None,
+        product_id: Optional[str] = None, amount: Optional[str] = None, settle_chain: Union[str, int, None] = None,
+        settle_token: Optional[str] = None, recipient: Optional[str] = None, description: Optional[str] = None,
+        customer_name: Optional[str] = None, merchant_name: Optional[str] = None, memo: Optional[str] = None,
+        days_until_due: Optional[int] = None, start_at: Optional[str] = None, metadata: Optional[Dict[str, str]] = None,
+    ) -> Subscription:
+        return await self._c._call("POST", "/subscriptions", json=_Base._subscription_body(dict(
+            customer_email=customer_email, interval=interval, interval_count=interval_count, product_id=product_id,
+            amount=amount, settle_chain=settle_chain, settle_token=settle_token, recipient=recipient,
+            description=description, customer_name=customer_name, merchant_name=merchant_name, memo=memo,
+            days_until_due=days_until_due, start_at=start_at, metadata=metadata), skip=None))
+
+    async def get(self, id: str) -> Subscription:
+        return await self._c._call("GET", f"/subscriptions/{_seg(id)}")
+
+    async def list(
+        self, *, status: Optional[SubscriptionStatus] = None, customer_email: Optional[str] = None,
+        cursor: Optional[str] = None, limit: Optional[int] = None,
+    ) -> SubscriptionsPage:
+        return await self._c._call("GET", "/subscriptions",
+                                   params=_Base._subscription_list_params(status, customer_email, cursor, limit))
+
+    async def update(
+        self, id: str, *, customer_email: Any = _UNSET, customer_name: Any = _UNSET, merchant_name: Any = _UNSET,
+        description: Any = _UNSET, memo: Any = _UNSET, amount: Any = _UNSET, days_until_due: Any = _UNSET,
+        metadata: Any = _UNSET, cancel_at_period_end: Any = _UNSET,
+    ) -> Subscription:
+        return await self._c._call("PATCH", f"/subscriptions/{_seg(id)}", json=_Base._subscription_body(dict(
+            customer_email=customer_email, customer_name=customer_name, merchant_name=merchant_name,
+            description=description, memo=memo, amount=amount, days_until_due=days_until_due, metadata=metadata,
+            cancel_at_period_end=cancel_at_period_end), skip=_UNSET))
+
+    async def cancel(self, id: str, *, at_period_end: Optional[bool] = None) -> Subscription:
+        return await self._c._call("POST", f"/subscriptions/{_seg(id)}/cancel",
+                                   json=_Base._subscription_cancel_body(at_period_end))
+
+    async def pause(self, id: str) -> Subscription:
+        return await self._c._call("POST", f"/subscriptions/{_seg(id)}/pause", json={})
+
+    async def resume(self, id: str) -> Subscription:
+        return await self._c._call("POST", f"/subscriptions/{_seg(id)}/resume", json={})
+
+    async def invoices(self, id: str) -> List[Invoice]:
+        return (await self._c._call("GET", f"/subscriptions/{_seg(id)}/invoices"))["invoices"]
+
+
+class LimitOrders:
+    """Solana limit orders (beta, Jupiter Trigger), as ``LayerHop.limit_orders``. ``create`` returns
+    an unsigned ``tx``: have ``wallet`` sign it (sign only, ``tx["submitViaApi"]``), then ``submit``
+    it. ``cancel`` returns the cancel tx to sign and ``submit`` the same way. Each fill becomes an
+    order with ``limitOrderId`` set; webhooks: ``limit_order.opened`` / ``filled`` / ``cancelled`` /
+    ``expired`` / ``failed``. An API key is optional (``list`` needs ``wallet`` without one).
+
+    Live mode may be disabled by the operator: ``create`` with a live key (or without a key) then
+    raises :class:`LayerHopApiError` with code ``FORBIDDEN``. Test keys (``lh_test_``) always work and
+    can fill or expire an order with ``simulate``.
+    """
+
+    def __init__(self, client: "LayerHop") -> None:
+        self._c = client
+
+    def create(
+        self, wallet: str, src_token: str, dst_token: str, amount: str, dst_amount: str, *,
+        expires_at: Optional[int] = None, chain: Union[str, int, None] = None, metadata: Optional[Dict[str, str]] = None,
+        integrator: Optional[str] = None, integrator_fee_bps: Optional[int] = None,
+    ) -> CreatedLimitOrder:
+        """Sell ``amount`` of ``src_token`` for at least ``dst_amount`` of ``dst_token`` (base units; the
+        limit price is ``dst_amount / amount``; worth at least $5). ``expires_at`` is unix seconds (at
+        least 60 s ahead; omit for good-till-cancelled). ``chain`` is ``solana`` only for now (the
+        default). ``integrator`` / ``integrator_fee_bps`` default to the client's, and ``channel`` is the
+        client channel. The fee applies when ``dst_token`` is SOL, USDC or USDT."""
+        return self._c._call("POST", "/limit-orders", json=self._c._limit_order_body(
+            wallet, src_token, dst_token, amount, dst_amount, expires_at, chain, metadata, integrator,
+            integrator_fee_bps))
+
+    def submit(self, id: str, signed_transaction: str) -> LimitOrderSubmitResponse:
+        """Send the wallet-signed create or cancel tx (base64). Returns the order and the tx signature."""
+        return self._c._call("POST", f"/limit-orders/{_seg(id)}/submit", json={"signedTransaction": signed_transaction})
+
+    def get(self, id: str) -> LimitOrderWithFills:
+        """The order and its ``fills`` (orders, newest first)."""
+        return self._c._call("GET", f"/limit-orders/{_seg(id)}")
+
+    def list(
+        self, *, wallet: Optional[str] = None, status: Optional[LimitOrderStatus] = None,
+        cursor: Optional[str] = None, limit: Optional[int] = None,
+    ) -> LimitOrdersPage:
+        """Orders of ``wallet``, or without it your API key's account, newest first. Pass ``nextCursor`` to page."""
+        return self._c._call("GET", "/limit-orders", params=_Base._limit_order_list_params(wallet, status, cursor, limit))
+
+    def cancel(self, id: str) -> LimitOrderCancelResponse:
+        """An open order: the cancel ``tx`` to sign and ``submit``. A never-submitted (``built``) order is
+        cancelled at once (``tx`` is ``None``)."""
+        return self._c._call("POST", f"/limit-orders/{_seg(id)}/cancel", json={})
+
+    def simulate(self, id: str, outcome: LimitOrderOutcome) -> LimitOrder:
+        """Test mode only (``FORBIDDEN`` with a live key): ``fill`` the rest, ``partial_fill`` half of the
+        rest, or ``expire`` an open order (applied by the worker within seconds)."""
+        return self._c._call("POST", f"/limit-orders/{_seg(id)}/simulate", json={"outcome": outcome})
+
+
+class AsyncLimitOrders:
+    """Limit orders, as ``AsyncLayerHop.limit_orders``. Same methods as :class:`LimitOrders`."""
+
+    def __init__(self, client: "AsyncLayerHop") -> None:
+        self._c = client
+
+    async def create(
+        self, wallet: str, src_token: str, dst_token: str, amount: str, dst_amount: str, *,
+        expires_at: Optional[int] = None, chain: Union[str, int, None] = None, metadata: Optional[Dict[str, str]] = None,
+        integrator: Optional[str] = None, integrator_fee_bps: Optional[int] = None,
+    ) -> CreatedLimitOrder:
+        return await self._c._call("POST", "/limit-orders", json=self._c._limit_order_body(
+            wallet, src_token, dst_token, amount, dst_amount, expires_at, chain, metadata, integrator,
+            integrator_fee_bps))
+
+    async def submit(self, id: str, signed_transaction: str) -> LimitOrderSubmitResponse:
+        return await self._c._call("POST", f"/limit-orders/{_seg(id)}/submit",
+                                   json={"signedTransaction": signed_transaction})
+
+    async def get(self, id: str) -> LimitOrderWithFills:
+        return await self._c._call("GET", f"/limit-orders/{_seg(id)}")
+
+    async def list(
+        self, *, wallet: Optional[str] = None, status: Optional[LimitOrderStatus] = None,
+        cursor: Optional[str] = None, limit: Optional[int] = None,
+    ) -> LimitOrdersPage:
+        return await self._c._call("GET", "/limit-orders",
+                                   params=_Base._limit_order_list_params(wallet, status, cursor, limit))
+
+    async def cancel(self, id: str) -> LimitOrderCancelResponse:
+        return await self._c._call("POST", f"/limit-orders/{_seg(id)}/cancel", json={})
+
+    async def simulate(self, id: str, outcome: LimitOrderOutcome) -> LimitOrder:
+        return await self._c._call("POST", f"/limit-orders/{_seg(id)}/simulate", json={"outcome": outcome})
+
+
 class DepositAddresses:
     """Deposit addresses, as ``LayerHop.deposit_addresses`` (API key): your user sends ``src_token``
     to ``address`` on ``src_chain`` without connecting a wallet, and the provider (Relay) delivers
@@ -797,7 +1092,9 @@ class LayerHop(_Base):
         self._client = http_client or httpx.Client(timeout=timeout, transport=transport)
         self.checkout = Checkout(self)
         self.invoices = Invoices(self)
+        self.subscriptions = Subscriptions(self)
         self.deposit_addresses = DepositAddresses(self)
+        self.limit_orders = LimitOrders(self)
         self.webhooks = Webhooks(self)
 
     def close(self) -> None:
@@ -838,11 +1135,15 @@ class LayerHop(_Base):
 
     def quote(
         self, src_chain: Union[str, int], src_token: str, amount: str, dst_chain: Union[str, int], dst_token: str,
-        *, sender: str, recipient: str, slippage_bps: int = 50,
+        *, sender: str, recipient: str, slippage_bps: int = 50, gas_on_arrival: Union[bool, float, None] = None,
     ) -> QuoteResponse:
-        """Ask every provider; ``best`` is the highest output for the user. ``amount`` is base units."""
+        """Ask every provider; ``best`` is the highest output for the user. ``amount`` is base units.
+
+        ``gas_on_arrival`` also delivers native gas on the destination chain: ``True`` = $2, or a USD
+        amount (0.5-20). Ignored for same-chain swaps, non-EVM destinations and native outputs;
+        providers that can't do it ignore it (check ``quote.get("gasOnArrival")``)."""
         return self._call("GET", "/quote", params=self._quote_params(
-            src_chain, src_token, amount, dst_chain, dst_token, sender, recipient, slippage_bps))
+            src_chain, src_token, amount, dst_chain, dst_token, sender, recipient, slippage_bps, gas_on_arrival))
 
     def build_tx(self, quote_id: str) -> BuiltTx:
         """The unsigned transaction for a quote. EVM txs may carry an ``approval`` to send first."""
@@ -916,7 +1217,9 @@ class AsyncLayerHop(_Base):
         self._client = http_client or httpx.AsyncClient(timeout=timeout, transport=transport)
         self.checkout = AsyncCheckout(self)
         self.invoices = AsyncInvoices(self)
+        self.subscriptions = AsyncSubscriptions(self)
         self.deposit_addresses = AsyncDepositAddresses(self)
+        self.limit_orders = AsyncLimitOrders(self)
         self.webhooks = AsyncWebhooks(self)
 
     async def aclose(self) -> None:
@@ -956,10 +1259,10 @@ class AsyncLayerHop(_Base):
 
     async def quote(
         self, src_chain: Union[str, int], src_token: str, amount: str, dst_chain: Union[str, int], dst_token: str,
-        *, sender: str, recipient: str, slippage_bps: int = 50,
+        *, sender: str, recipient: str, slippage_bps: int = 50, gas_on_arrival: Union[bool, float, None] = None,
     ) -> QuoteResponse:
         return await self._call("GET", "/quote", params=self._quote_params(
-            src_chain, src_token, amount, dst_chain, dst_token, sender, recipient, slippage_bps))
+            src_chain, src_token, amount, dst_chain, dst_token, sender, recipient, slippage_bps, gas_on_arrival))
 
     async def build_tx(self, quote_id: str) -> BuiltTx:
         return (await self._call("POST", "/orders", json={"quoteId": quote_id}))["tx"]
