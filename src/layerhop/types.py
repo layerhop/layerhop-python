@@ -49,6 +49,17 @@ class FeeBreakdown(TypedDict):
     integrator: NotRequired[str]
 
 
+class GasOnArrival(TypedDict):
+    """Native gas a route delivers to the recipient on top of ``dstAmount`` (its cost is already
+    taken out of ``dstAmount``)."""
+
+    amount: str  # Base units of the destination chain's native token.
+    token: str  # Native token address on the destination chain (EVM: ``0x000...000``).
+    symbol: str
+    decimals: int
+    usd: NotRequired[float]  # USD value at quote time.
+
+
 class Quote(TypedDict):
     quoteId: str
     provider: ProviderId
@@ -57,6 +68,7 @@ class Quote(TypedDict):
     estimatedSeconds: int
     fees: FeeBreakdown
     expiresAt: int
+    gasOnArrival: NotRequired[GasOnArrival]  # Present when gas on arrival was requested and this route includes it.
 
 
 class ProviderError(TypedDict):
@@ -78,6 +90,12 @@ class Approval(TypedDict):
     amount: str
 
 
+class EvmCall(TypedDict):
+    to: str
+    data: str
+    value: str
+
+
 class EvmTx(TypedDict):
     vm: Literal["evm"]
     chainId: int
@@ -85,6 +103,9 @@ class EvmTx(TypedDict):
     data: str
     value: str
     approval: NotRequired[Approval]
+    # Further calls to send after the main transaction, in order (e.g. LayerHop's fee transfer on a
+    # same-token checkout payment). Report the main transaction's hash.
+    extraTxs: NotRequired[List[EvmCall]]
     sandbox: NotRequired[bool]  # Test mode only: a placeholder that moves no funds. Never broadcast it.
 
 
@@ -153,6 +174,7 @@ class Order(TypedDict, total=False):
     livemode: bool  # ``False`` for test-mode orders.
     checkoutSessionId: Optional[str]  # The checkout session this order pays, if any.
     depositAddressId: Optional[str]  # The deposit address this order came from, if any.
+    limitOrderId: Optional[str]  # The limit order this order is a fill of, if any (``quoteId`` starts with ``lof_``).
     refundId: NotRequired[Optional[str]]  # The checkout refund this order sends, if any.
     createdAt: str
     updatedAt: str
@@ -261,6 +283,8 @@ WebhookEventType = Literal[
     "order.submitted", "order.filled", "order.refunded", "order.failed",
     "checkout.session.processing", "checkout.session.completed", "checkout.session.payment_failed",
     "checkout.session.expired", "checkout.session.refunded", "invoice.sent", "invoice.paid",
+    "subscription.created", "subscription.renewed", "subscription.past_due", "subscription.canceled",
+    "limit_order.opened", "limit_order.filled", "limit_order.cancelled", "limit_order.expired", "limit_order.failed",
 ]
 
 
@@ -272,7 +296,10 @@ class WebhookEvent(TypedDict):
     livemode: bool
     sample: NotRequired[bool]  # Present on samples from the dashboard or ``webhooks.trigger``.
     createdAt: str
-    data: Dict[str, Any]  # ``{"order": Order}``, ``{"session": CheckoutSession}``, plus ``refund`` / ``invoice``.
+    # ``{"order": Order}``, ``{"session": CheckoutSession}``, plus ``refund`` / ``invoice``;
+    # ``{"subscription": Subscription}`` (``renewed`` / ``past_due`` add ``invoice``);
+    # ``{"limitOrder": LimitOrder}`` (``limit_order.filled`` adds ``fill``, the fill's OrderSummary).
+    data: Dict[str, Any]
 
 
 class TriggerWebhookResponse(TypedDict):
@@ -317,6 +344,7 @@ class Invoice(PublicInvoice):
     customerEmail: Optional[str]
     recipient: str
     sessionId: Optional[str]  # The checkout session paying the invoice.
+    subscriptionId: NotRequired[Optional[str]]  # The subscription this invoice bills a period of, if any.
     sentAt: Optional[str]
     receiptSentAt: Optional[str]
     voidedAt: Optional[str]
@@ -331,6 +359,51 @@ class InvoicesPage(TypedDict):
 class InvoicePayResponse(TypedDict):
     sessionId: str
     url: str  # The hosted checkout page.
+
+
+SubscriptionStatus = Literal["active", "past_due", "canceled", "paused"]
+"""``active`` (billing each period), ``past_due`` (an invoice is unpaid past its due date: reminders go
+out and renewals wait), ``paused`` (no invoices or reminders), ``canceled`` (by you, or 7 days past due)."""
+
+SubscriptionInterval = Literal["day", "week", "month", "year"]
+
+
+class Subscription(TypedDict):
+    """Recurring billing: LayerHop issues and emails an invoice every period."""
+
+    id: str
+    object: Literal["subscription"]
+    livemode: bool
+    status: SubscriptionStatus
+    customerEmail: str
+    customerName: Optional[str]
+    merchantName: Optional[str]
+    description: str  # The invoice line item; each invoice adds the period's dates.
+    memo: Optional[str]
+    productId: Optional[str]
+    amount: str  # Price per period, base units of the settlement token.
+    settlement: CheckoutSettlement
+    recipient: str  # Your payout address.
+    interval: SubscriptionInterval
+    intervalCount: int
+    daysUntilDue: int
+    currentPeriodStart: Optional[str]  # Start of the period last invoiced (``None`` before the first invoice).
+    currentPeriodEnd: Optional[str]
+    nextInvoiceAt: Optional[str]  # When the next invoice is issued (``None`` when paused or canceled).
+    cancelAt: Optional[str]  # Scheduled cancel (the end of the current period).
+    cancelAtPeriodEnd: bool
+    canceledAt: Optional[str]
+    cancellationReason: Optional[str]  # ``requested`` (you canceled) or ``unpaid`` (7 days past due).
+    pausedAt: Optional[str]
+    latestInvoiceId: Optional[str]  # The invoice of the current period.
+    metadata: Optional[Dict[str, str]]
+    createdAt: str
+    updatedAt: str
+
+
+class SubscriptionsPage(TypedDict):
+    subscriptions: List[Subscription]
+    nextCursor: Optional[str]
 
 
 RefundStatus = Literal["pending", "submitted", "completed", "failed"]
@@ -432,6 +505,77 @@ class DepositAddressesPage(TypedDict):
 
 class SimulateDepositResponse(TypedDict):
     order: Order  # The test deposit order (``provider`` ``sandbox``), settled like any test order.
+
+
+LimitOrderStatus = Literal["built", "open", "filled", "cancelled", "expired", "failed"]
+"""``built`` (tx built, not submitted), ``open`` (live on chain, may be partly filled), ``filled``,
+``cancelled`` (unfilled input returned), ``expired`` (reached ``expiresAt``), ``failed`` (the order tx
+never landed)."""
+
+LimitOrderOutcome = Literal["fill", "partial_fill", "expire"]
+
+
+class LimitOrderFees(TypedDict):
+    ourFeeBps: int  # LayerHop's fee written into the order (0 when ``dstToken`` carries no fee).
+    integratorFeeBps: int
+    integrator: Optional[str]  # The partner id, if a partner fee applies.
+
+
+class LimitOrder(TypedDict):
+    """A Solana limit order (Jupiter Trigger). Fills are orders whose ``quoteId`` starts with ``lof_``."""
+
+    id: str
+    object: Literal["limit_order"]
+    livemode: bool
+    status: LimitOrderStatus
+    statusDetail: Optional[str]
+    provider: ProviderId  # ``jupiter`` (live) or ``sandbox`` (test mode).
+    chainId: int  # Always ``7565164`` (Solana) for now.
+    wallet: str  # The maker wallet.
+    srcToken: str  # Mint sold.
+    dstToken: str  # Mint bought.
+    amount: str  # Input, base units.
+    dstAmount: str  # Minimum output for the whole order, base units.
+    expiresAt: Optional[str]
+    fees: LimitOrderFees
+    providerOrderId: str
+    filledAmount: str  # Input filled so far.
+    filledDstAmount: str  # Output received so far.
+    fillCount: int
+    openTxHash: Optional[str]
+    cancelTxHash: Optional[str]  # Set once a cancel tx was submitted; the status turns ``cancelled`` when confirmed.
+    channel: FeeChannel
+    metadata: Optional[Dict[str, str]]
+    createdAt: str
+    updatedAt: str
+
+
+class CreatedLimitOrder(LimitOrder):
+    """Response of ``limit_orders.create``: the order plus the unsigned ``tx`` (``submitViaApi``) for
+    ``wallet`` to sign."""
+
+    tx: SvmTx
+
+
+class LimitOrderWithFills(LimitOrder):
+    """Response of ``limit_orders.get``: the order plus its ``fills`` (orders), newest first."""
+
+    fills: List[Order]
+
+
+class LimitOrdersPage(TypedDict):
+    limitOrders: List[LimitOrder]
+    nextCursor: Optional[str]
+
+
+class LimitOrderSubmitResponse(TypedDict):
+    limitOrder: LimitOrder
+    txHash: str  # The landed transaction's signature.
+
+
+class LimitOrderCancelResponse(TypedDict):
+    limitOrder: LimitOrder
+    tx: Optional[SvmTx]  # The cancel tx to sign and submit, or ``None`` when a ``built`` order was cancelled at once.
 
 
 StatusComponentState = Literal["operational", "degraded", "down"]

@@ -44,6 +44,33 @@ def test_quote_query_and_api_key(api):
     assert api.last.headers["x-api-key"] == "lh_live_x"
 
 
+def test_quote_gas_on_arrival(api):
+    goa = {"amount": "800000000000000", "token": "0x0000000000000000000000000000000000000000", "symbol": "ETH",
+           "decimals": 18, "usd": 2.01}
+    api.on("GET", "/v1/quote", {**QUOTE_RESPONSE, "best": {**QUOTE_RESPONSE["best"], "gasOnArrival": goa}})
+    lh = make(api)
+    r = lh.quote("solana", "USDC", "100000000", "base", "USDC", sender="9W", recipient="0xr", gas_on_arrival=True)
+    p = dict(api.last.url.params)
+    assert p["gasOnArrival"] == "true" and "gasOnArrivalUsd" not in p
+    assert r["best"]["gasOnArrival"] == goa
+    lh.quote("solana", "USDC", "100000000", "base", "USDC", sender="9W", recipient="0xr", gas_on_arrival=5)
+    p = dict(api.last.url.params)
+    assert p["gasOnArrivalUsd"] == "5" and "gasOnArrival" not in p
+    lh.quote("solana", "USDC", "100000000", "base", "USDC", sender="9W", recipient="0xr", gas_on_arrival=0.5)
+    assert api.last.url.params["gasOnArrivalUsd"] == "0.5"
+    for off in (False, None):
+        lh.quote("solana", "USDC", "100000000", "base", "USDC", sender="9W", recipient="0xr", gas_on_arrival=off)
+        p = dict(api.last.url.params)
+        assert "gasOnArrival" not in p and "gasOnArrivalUsd" not in p
+
+
+def test_extra_txs_on_evm_tx(api):
+    tx = {**EVM_TX, "extraTxs": [{"to": "0xusdc", "data": "0xa9059cbb", "value": "0"}]}
+    api.on("POST", "/v1/orders", {"tx": tx})
+    built = make(api).build_tx("q_1")
+    assert built["vm"] == "evm" and built.get("extraTxs") == [{"to": "0xusdc", "data": "0xa9059cbb", "value": "0"}]
+
+
 def test_quote_rejects_non_string_amount(api):
     with pytest.raises(TypeError):
         make(api).quote("base", "USDC", 100, "solana", "SOL", sender="a", recipient="b")  # type: ignore[arg-type]
@@ -153,6 +180,8 @@ async def test_async_client(api):
         assert await lh.tokens(1) == []
         q = await lh.quote("base", "USDC", "1", "solana", "SOL", sender="a", recipient="b")
         assert q["best"]["provider"] == "relay"
+        await lh.quote("solana", "USDC", "1", "base", "USDC", sender="a", recipient="b", gas_on_arrival=2.5)
+        assert api.last.url.params["gasOnArrivalUsd"] == "2.5"
         assert api.last.headers["x-api-key"] == "k"
         assert (await lh.build_tx("q_1"))["vm"] == "evm"
         assert await lh.submit("q_1", "AA") == "sig"
