@@ -108,3 +108,22 @@ STATUS = {
                    "startedAt": "2026-10-18T11:50:00.000Z", "resolvedAt": None}],
     "url": "https://layerhop.com/status",
 }
+DEPOSIT_ADDRESS = {
+    "id": "da_01m5f3k2c4x8q6r0v3b5n7p9d", "object": "deposit_address", "livemode": False, "status": "active",
+    "provider": "sandbox", "address": "0x4c3f1a0b9d8e7f6a5b4c3d2e1f0a9b8c7d6e5f4a", "chainId": 8453,
+    "token": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", "dstChainId": 42161,
+    "dstToken": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831", "recipient": "0x2222222222222222222222222222222222222222",
+    "refundTo": "0x1111111111111111111111111111111111111111", "reusable": True, "amount": None,
+    "fees": {"ourFeeBps": 20, "integratorFeeBps": 0, "integrator": None}, "label": "user_42",
+    "metadata": {"userId": "42"}, "depositCount": 0, "lastDepositAt": None, "createdAt": "2026-10-19T10:00:00.000Z",
+}
+DEPOSIT_ORDER = {
+    "quoteId": "dep_5f0c1e2d3a4b5c6d7e8f9a0b1c2d3e4f", "provider": "sandbox", "status": "submitted", "statusDetail": None,
+    "channel": "api", "ourFeeBps": 20, "partnerFeeBps": 0, "sender": "0x1111111111111111111111111111111111111111",
+    "recipient": "0x2222222222222222222222222222222222222222", "srcChainId": 8453,
+    "srcToken": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", "dstChainId": 42161,
+    "dstToken": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831", "amount": "25000000", "dstAmount": "24930000",
+    "srcTxHash": "0xabc", "dstTxHash": None, "livemode": False, "checkoutSessionId": None, "refundId": None,
+    "depositAddressId": "da_01m5f3k2c4x8q6r0v3b5n7p9d", "keyId": "key_1", "partnerId": None, "partnerFeeEstimate": "0",
+    "createdAt": "2026-10-19T10:05:00.000Z", "updatedAt": "2026-10-19T10:05:00.000Z",
+}

@@ -97,6 +97,10 @@ async with AsyncLayerHop() as lh:
 | `invoices.list(*, status, cursor, limit)` · `invoices.get(id)` · `invoices.update(id, **fields)` | `GET /v1/invoices` · `GET`/`PATCH /v1/invoices/{id}` |
 | `invoices.send(id)` · `invoices.void(id)` | `POST /v1/invoices/{id}/send` · `/void` |
 | `invoices.public_view(id)` · `invoices.pay(id)` | `GET /v1/invoices/{id}/public` · `POST /v1/invoices/{id}/pay` (public) |
+| `deposit_addresses.create(src_chain, src_token, dst_chain, dst_token, recipient, refund_to, *, reusable, amount, label, metadata, integrator, integrator_fee_bps)` | `POST /v1/deposit-addresses` |
+| `deposit_addresses.list(*, status, label, cursor, limit)` · `deposit_addresses.get(id)` | `GET /v1/deposit-addresses` · `GET /v1/deposit-addresses/{id}` |
+| `deposit_addresses.refresh(id)` · `deposit_addresses.disable(id)` | `POST /v1/deposit-addresses/{id}/refresh` · `/disable` |
+| `deposit_addresses.simulate(id, amount)` | `POST /v1/deposit-addresses/{id}/simulate` (test keys only) |
 | `service_status()` | `GET /v1/status` (platform status, public) |
 | `webhooks.stream()` | `GET /v1/webhooks/stream` (SSE, API key) |
 | `webhooks.trigger(type)` | `POST /v1/webhooks/trigger` (test keys only) |
@@ -206,6 +210,32 @@ lh.invoices.send(inv["id"])   # re-sends the email of an open invoice
 lh.invoices.void(inv["id"])   # draft or open only
 # Fulfil on the invoice.paid webhook. Statuses: draft, open, paid, void.
 ```
+
+## Deposit addresses
+
+Let a user swap or bridge by just **sending** tokens to an address: no wallet connection, no
+signing in your app. The provider (Relay) owns the address and delivers `dst_token` to `recipient`;
+LayerHop never holds the funds. Each detected deposit becomes an order with `depositAddressId` set
+and the usual `order.*` webhooks. Everything needs an API key.
+
+```python
+da = lh.deposit_addresses.create(
+    "base", "USDC", "arbitrum", "USDC",
+    "0xRecipientOnArbitrum", "0xUserRefundAddressOnBase",  # refund_to: never a CEX deposit address
+    label="user_42",  # reusable=True by default; reusable=False + amount = one-time address
+)
+print(da["address"], da["estimate"]["dstAmount"])  # show the address to your user
+
+lh.deposit_addresses.refresh(da["id"])            # "I sent it": check for deposits now
+lh.deposit_addresses.get(da["id"])["deposits"]    # its 20 most recent deposits (orders)
+lh.deposit_addresses.list(label="user_42")
+lh.deposit_addresses.disable(da["id"])
+```
+
+Live mode may be disabled by the operator: `create` with a live key then raises a
+`LayerHopApiError` with code `FORBIDDEN`. Test keys always work, and
+`lh.deposit_addresses.simulate(da["id"], "25000000")` records a test deposit that settles like any
+test order. Deposits under $1 may not be processed.
 
 ## Refunds
 
