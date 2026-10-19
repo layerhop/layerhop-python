@@ -19,7 +19,7 @@ def amake(api: FakeApi, **kw) -> AsyncLayerHop:
 
 
 def test_version():
-    assert layerhop.__version__ == "0.5.1"
+    assert layerhop.__version__ == "0.6.0"
 
 
 def test_create_sends_body_and_parses_product(api):
