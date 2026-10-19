@@ -78,6 +78,12 @@ class Approval(TypedDict):
     amount: str
 
 
+class EvmCall(TypedDict):
+    to: str
+    data: str
+    value: str
+
+
 class EvmTx(TypedDict):
     vm: Literal["evm"]
     chainId: int
@@ -85,6 +91,9 @@ class EvmTx(TypedDict):
     data: str
     value: str
     approval: NotRequired[Approval]
+    # Further calls to send after the main transaction, in order (e.g. LayerHop's fee transfer on a
+    # same-token checkout payment). Report the main transaction's hash.
+    extraTxs: NotRequired[List[EvmCall]]
     sandbox: NotRequired[bool]  # Test mode only: a placeholder that moves no funds. Never broadcast it.
 
 
