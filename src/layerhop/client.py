@@ -25,6 +25,11 @@ from .types import (
     CheckoutSession,
     CheckoutSessionsPage,
     CheckoutStatus,
+    CreatedDepositAddress,
+    DepositAddress,
+    DepositAddressesPage,
+    DepositAddressStatus,
+    DepositAddressWithDeposits,
     FeeChannel,
     Invoice,
     InvoiceLineItem,
@@ -39,6 +44,7 @@ from .types import (
     Refund,
     RefundCreateResponse,
     ReportSubmittedResponse,
+    SimulateDepositResponse,
     SimulateResponse,
     StatusResponse,
     Token,
@@ -254,6 +260,34 @@ class _Base:
             if v is not None:
                 b[k] = v
         return b
+
+    def _deposit_address_body(
+        self, src_chain: Union[str, int], src_token: str, dst_chain: Union[str, int], dst_token: str,
+        recipient: str, refund_to: str, reusable: Optional[bool], amount: Optional[str], label: Optional[str],
+        metadata: Optional[Dict[str, str]], integrator: Optional[str], integrator_fee_bps: Optional[int],
+    ) -> Dict[str, Any]:
+        if amount is not None and not isinstance(amount, str):
+            raise TypeError("amount must be an integer string in base units (e.g. '100000000')")
+        b: Dict[str, Any] = {
+            "srcChain": str(src_chain), "srcToken": src_token, "dstChain": str(dst_chain), "dstToken": dst_token,
+            "recipient": recipient, "refundTo": refund_to,
+        }
+        integrator = integrator if integrator is not None else self.integrator
+        integrator_fee_bps = integrator_fee_bps if integrator_fee_bps is not None else self.integrator_fee_bps
+        for k, v in (("reusable", reusable), ("amount", amount), ("label", label), ("metadata", metadata),
+                     ("integrator", integrator), ("integratorFeeBps", integrator_fee_bps)):
+            if v is not None:
+                b[k] = v
+        return b
+
+    @staticmethod
+    def _deposit_address_list_params(
+        status: Optional[str], label: Optional[str], cursor: Optional[str], limit: Optional[int],
+    ) -> Dict[str, str]:
+        p = _Base._orders_params(None, status, cursor, limit)
+        if label:
+            p["label"] = label
+        return p
 
     @staticmethod
     def _handle(res: httpx.Response) -> Any:
@@ -522,6 +556,101 @@ class AsyncInvoices:
         return await self._c._call("POST", f"/invoices/{_seg(id)}/pay", json={})
 
 
+class DepositAddresses:
+    """Deposit addresses, as ``LayerHop.deposit_addresses`` (API key): your user sends ``src_token``
+    to ``address`` on ``src_chain`` without connecting a wallet, and the provider (Relay) delivers
+    ``dst_token`` to ``recipient`` on ``dst_chain``. LayerHop never holds the funds; each detected
+    deposit becomes an order (``depositAddressId`` set) with the usual ``order.*`` webhooks.
+
+    Live mode may be disabled by the operator: ``create`` with a live key then raises
+    :class:`LayerHopApiError` with code ``FORBIDDEN``. Test keys (``lh_test_``) always work and can
+    record a fake deposit with ``simulate``.
+    """
+
+    def __init__(self, client: "LayerHop") -> None:
+        self._c = client
+
+    def create(
+        self, src_chain: Union[str, int], src_token: str, dst_chain: Union[str, int], dst_token: str,
+        recipient: str, refund_to: str, *, reusable: Optional[bool] = None, amount: Optional[str] = None,
+        label: Optional[str] = None, metadata: Optional[Dict[str, str]] = None, integrator: Optional[str] = None,
+        integrator_fee_bps: Optional[int] = None,
+    ) -> CreatedDepositAddress:
+        """Create an address. ``reusable`` defaults to ``True`` (any amount, forever, for this route);
+        ``reusable=False`` is a one-time address for exactly ``amount`` (required then). ``refund_to``
+        is your user's address on ``src_chain`` (never a CEX deposit address). The response carries an
+        ``estimate`` for ``amount`` (default: about $100 of ``src_token``). Deposits under $1 may be lost."""
+        return self._c._call("POST", "/deposit-addresses", json=self._c._deposit_address_body(
+            src_chain, src_token, dst_chain, dst_token, recipient, refund_to, reusable, amount, label, metadata,
+            integrator, integrator_fee_bps))
+
+    def get(self, id: str) -> DepositAddressWithDeposits:
+        """The address and its 20 most recent deposits (``deposits``, orders, newest first)."""
+        return self._c._call("GET", f"/deposit-addresses/{_seg(id)}")
+
+    def list(
+        self, *, status: Optional[DepositAddressStatus] = None, label: Optional[str] = None,
+        cursor: Optional[str] = None, limit: Optional[int] = None,
+    ) -> DepositAddressesPage:
+        """Your addresses of the key's mode (live or test), newest first. Pass ``nextCursor`` to page."""
+        return self._c._call("GET", "/deposit-addresses",
+                             params=_Base._deposit_address_list_params(status, label, cursor, limit))
+
+    def refresh(self, id: str) -> DepositAddress:
+        """Check for deposits now (call it when your user says they sent). ``CONFLICT`` when disabled."""
+        return self._c._call("POST", f"/deposit-addresses/{_seg(id)}/refresh", json={})
+
+    def disable(self, id: str) -> DepositAddress:
+        """Stop tracking the address. Tell your user not to send to it again."""
+        return self._c._call("POST", f"/deposit-addresses/{_seg(id)}/disable", json={})
+
+    def simulate(self, id: str, amount: str) -> SimulateDepositResponse:
+        """Test mode only (``FORBIDDEN`` with a live key): record a deposit of ``amount`` (base units of
+        the source token). The order settles like any test order (amounts ending in 4001 / 4002 end
+        ``refunded`` / ``failed``)."""
+        if not isinstance(amount, str):
+            raise TypeError("amount must be an integer string in base units (e.g. '100000000')")
+        return self._c._call("POST", f"/deposit-addresses/{_seg(id)}/simulate", json={"amount": amount})
+
+
+class AsyncDepositAddresses:
+    """Deposit addresses, as ``AsyncLayerHop.deposit_addresses``. Same methods as :class:`DepositAddresses`."""
+
+    def __init__(self, client: "AsyncLayerHop") -> None:
+        self._c = client
+
+    async def create(
+        self, src_chain: Union[str, int], src_token: str, dst_chain: Union[str, int], dst_token: str,
+        recipient: str, refund_to: str, *, reusable: Optional[bool] = None, amount: Optional[str] = None,
+        label: Optional[str] = None, metadata: Optional[Dict[str, str]] = None, integrator: Optional[str] = None,
+        integrator_fee_bps: Optional[int] = None,
+    ) -> CreatedDepositAddress:
+        return await self._c._call("POST", "/deposit-addresses", json=self._c._deposit_address_body(
+            src_chain, src_token, dst_chain, dst_token, recipient, refund_to, reusable, amount, label, metadata,
+            integrator, integrator_fee_bps))
+
+    async def get(self, id: str) -> DepositAddressWithDeposits:
+        return await self._c._call("GET", f"/deposit-addresses/{_seg(id)}")
+
+    async def list(
+        self, *, status: Optional[DepositAddressStatus] = None, label: Optional[str] = None,
+        cursor: Optional[str] = None, limit: Optional[int] = None,
+    ) -> DepositAddressesPage:
+        return await self._c._call("GET", "/deposit-addresses",
+                                   params=_Base._deposit_address_list_params(status, label, cursor, limit))
+
+    async def refresh(self, id: str) -> DepositAddress:
+        return await self._c._call("POST", f"/deposit-addresses/{_seg(id)}/refresh", json={})
+
+    async def disable(self, id: str) -> DepositAddress:
+        return await self._c._call("POST", f"/deposit-addresses/{_seg(id)}/disable", json={})
+
+    async def simulate(self, id: str, amount: str) -> SimulateDepositResponse:
+        if not isinstance(amount, str):
+            raise TypeError("amount must be an integer string in base units (e.g. '100000000')")
+        return await self._c._call("POST", f"/deposit-addresses/{_seg(id)}/simulate", json={"amount": amount})
+
+
 class Checkout:
     """Checkout ("pay with any token"), as ``LayerHop.checkout``.
 
@@ -668,6 +797,7 @@ class LayerHop(_Base):
         self._client = http_client or httpx.Client(timeout=timeout, transport=transport)
         self.checkout = Checkout(self)
         self.invoices = Invoices(self)
+        self.deposit_addresses = DepositAddresses(self)
         self.webhooks = Webhooks(self)
 
     def close(self) -> None:
@@ -786,6 +916,7 @@ class AsyncLayerHop(_Base):
         self._client = http_client or httpx.AsyncClient(timeout=timeout, transport=transport)
         self.checkout = AsyncCheckout(self)
         self.invoices = AsyncInvoices(self)
+        self.deposit_addresses = AsyncDepositAddresses(self)
         self.webhooks = AsyncWebhooks(self)
 
     async def aclose(self) -> None:

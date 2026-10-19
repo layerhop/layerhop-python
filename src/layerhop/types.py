@@ -152,6 +152,7 @@ class Order(TypedDict, total=False):
     dstTxHash: str
     livemode: bool  # ``False`` for test-mode orders.
     checkoutSessionId: Optional[str]  # The checkout session this order pays, if any.
+    depositAddressId: Optional[str]  # The deposit address this order came from, if any.
     refundId: NotRequired[Optional[str]]  # The checkout refund this order sends, if any.
     createdAt: str
     updatedAt: str
@@ -368,6 +369,69 @@ class RefundCreateResponse(TypedDict):
     refund: Refund
     quote: RefundQuote
     next: str  # What to do next (build, sign, report).
+
+
+DepositAddressStatus = Literal["active", "disabled"]
+
+
+class DepositAddressFees(TypedDict):
+    ourFeeBps: int
+    integratorFeeBps: int
+    integrator: Optional[str]  # The partner id, if a partner fee applies.
+
+
+class DepositAddress(TypedDict):
+    """An address the end user sends ``token`` to on ``chainId``; the provider delivers ``dstToken``
+    to ``recipient`` on ``dstChainId``. LayerHop never holds the funds."""
+
+    id: str
+    object: Literal["deposit_address"]
+    livemode: bool
+    status: DepositAddressStatus
+    provider: ProviderId  # ``relay`` (live) or ``sandbox`` (test mode).
+    address: str  # Show this to your user: they send ``token`` here on ``chainId``.
+    chainId: int  # Source chain.
+    token: str  # Source token address.
+    dstChainId: int
+    dstToken: str
+    recipient: str  # Receives ``dstToken`` on ``dstChainId``.
+    refundTo: str  # Refund address on ``chainId``.
+    reusable: bool  # ``False``: a one-time address for exactly ``amount``.
+    amount: Optional[str]  # One-time addresses only, base units of ``token``.
+    fees: DepositAddressFees
+    label: Optional[str]
+    metadata: Optional[Dict[str, str]]
+    depositCount: int
+    lastDepositAt: Optional[str]
+    createdAt: str
+
+
+class DepositAddressEstimate(TypedDict):
+    amount: str  # The amount the estimate was priced for, base units of ``token``.
+    dstAmount: str
+    dstAmountMin: str
+    estimatedSeconds: int
+
+
+class CreatedDepositAddress(DepositAddress):
+    """Response of ``deposit_addresses.create``: the address plus an ``estimate``."""
+
+    estimate: DepositAddressEstimate
+
+
+class DepositAddressWithDeposits(DepositAddress):
+    """Response of ``deposit_addresses.get``: the address plus its 20 most recent deposits (orders)."""
+
+    deposits: List[Order]
+
+
+class DepositAddressesPage(TypedDict):
+    depositAddresses: List[DepositAddress]
+    nextCursor: Optional[str]
+
+
+class SimulateDepositResponse(TypedDict):
+    order: Order  # The test deposit order (``provider`` ``sandbox``), settled like any test order.
 
 
 StatusComponentState = Literal["operational", "degraded", "down"]
