@@ -1178,11 +1178,11 @@ class LayerHop(_Base):
 
     def stream_order(self, quote_id: str) -> Iterator[Order]:
         """Live order status (Server-Sent Events): yields the order now and on every change, and ends
-        when it is final (filled, refunded, failed or expired). Break out of the loop to stop early."""
+        when it is final (filled, refunded, failed, expired or dropped). Break out of the loop to stop early."""
         return self._stream(f"/orders/{_seg(quote_id)}/events", "order")
 
     def watch(self, provider: str, id: str, *, interval: float = 3.0, timeout: float = 1800.0) -> Iterator[OrderStatus]:
-        """Poll until the order is final (filled/refunded/failed), yielding each state change."""
+        """Poll until the order is final (filled/refunded/failed/dropped), yielding each state change."""
         end = time.monotonic() + timeout
         last = None
         while time.monotonic() < end:

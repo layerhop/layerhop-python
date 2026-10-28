@@ -141,7 +141,7 @@ if goa:
 ## Live order status
 
 `stream_order` follows an order over Server-Sent Events instead of polling: it yields the order
-now and on every change, and ends once it is final (`filled`, `refunded`, `failed` or `expired`).
+now and on every change, and ends once it is final (`filled`, `refunded`, `failed`, `expired` or `dropped`).
 `checkout.stream(id)` does the same for a checkout session (until `paid`, `expired` or
 `needs_review`).
 

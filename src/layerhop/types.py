@@ -20,8 +20,8 @@ ProviderId = str
 ``sandbox`` (every request made with an ``lh_test_`` key) | ``direct`` (a plain transfer, used by checkout)"""
 
 FeeChannel = Literal["web", "widget", "bot", "api"]
-OrderState = Literal["pending", "filled", "refunded", "failed", "unknown"]
-FINAL_STATES = frozenset({"filled", "refunded", "failed"})
+OrderState = Literal["pending", "filled", "refunded", "failed", "unknown", "dropped"]
+FINAL_STATES = frozenset({"filled", "refunded", "failed", "dropped"})
 
 
 class Chain(TypedDict):
@@ -280,7 +280,7 @@ class CheckoutQuoteResponse(TypedDict):
 
 
 WebhookEventType = Literal[
-    "order.submitted", "order.filled", "order.refunded", "order.failed",
+    "order.submitted", "order.filled", "order.refunded", "order.failed", "order.dropped",
     "checkout.session.processing", "checkout.session.completed", "checkout.session.payment_failed",
     "checkout.session.expired", "checkout.session.refunded", "invoice.sent", "invoice.paid",
     "subscription.created", "subscription.renewed", "subscription.past_due", "subscription.canceled",
