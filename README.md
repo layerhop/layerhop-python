@@ -70,9 +70,16 @@ async with AsyncLayerHop() as lh:
 |---|---|
 | `health()` | `GET /v1/health` |
 | `chains()` | `GET /v1/chains` |
-| `tokens(chain)` | `GET /v1/tokens?chain=` |
-| `quote(src_chain, src_token, amount, dst_chain, dst_token, *, sender, recipient, slippage_bps=50, gas_on_arrival=None)` | `GET /v1/quote` |
-| `build_tx(quote_id)` | `POST /v1/orders` → the `tx` |
+| `tokens(chain, *, q, limit, cursor)` · `tokens_page(chain, *, q, limit, cursor)` | `GET /v1/tokens` → the `tokens` · `{tokens, nextCursor}` |
+| `lookup_token(address, chain=None)` | `GET /v1/tokens/lookup` → the `token` (chain found by the API when omitted) |
+| `token_risk(chain, address)` | `GET /v1/tokens/{chain}/{address}/risk` → the `risk` |
+| `prices(ids)` | `GET /v1/prices` → `{"chainId:address": usd}` |
+| `balances(address, chains=None, *, tokens, fresh)` | `GET /v1/balances` |
+| `quote(src_chain, src_token, amount, dst_chain, dst_token, *, sender, recipient, slippage_bps=50, gas_on_arrival=None, gasless=False, referrer, copy_of, purpose, split_id, split_share, note)` | `GET /v1/quote` |
+| `quote_calls(src_chain, src_token, dst_chain, dst_token, dst_amount, *, sender, recipient, slippage_bps=50, calls, action, referrer, copy_of)` | `POST /v1/quote` (destination calls) |
+| `build_tx(quote_id)` | `POST /v1/orders` → the `tx` (EVM, Solana or Tron) |
+| `build_gasless(quote_id)` | `POST /v1/orders` → the `gasless` typed data to sign |
+| `submit_gasless(quote_id, trade_signature, approval_signature=None)` · `gasless_status(quote_id)` | `POST /v1/orders/gasless` · `GET /v1/orders/gasless/{quoteId}` |
 | `simulate(quote_id)` | `POST /v1/simulate` (dry-run, records nothing) |
 | `submit(quote_id, signed_transaction)` | `POST /v1/orders/submit` (Solana `submitViaApi` only) |
 | `report_submitted(quote_id, tx_hash)` | `POST /v1/orders/{quoteId}/submitted` |
@@ -110,6 +117,13 @@ async with AsyncLayerHop() as lh:
 | `limit_orders.list(*, wallet, status, cursor, limit)` · `limit_orders.get(id)` | `GET /v1/limit-orders` · `GET /v1/limit-orders/{id}` |
 | `limit_orders.cancel(id)` | `POST /v1/limit-orders/{id}/cancel` |
 | `limit_orders.simulate(id, outcome)` | `POST /v1/limit-orders/{id}/simulate` (test keys only) |
+| `recurring_orders.create(wallet, dst_token, amount, orders, interval_seconds, *, src_token, chain)` | `POST /v1/recurring-orders` |
+| `recurring_orders.submit(request_id, signed_transaction)` · `recurring_orders.list(wallet, *, status, page)` | `POST /v1/recurring-orders/submit` · `GET /v1/recurring-orders` |
+| `recurring_orders.cancel(id, wallet)` | `POST /v1/recurring-orders/{id}/cancel` |
+| `splits.create(recipient, chain, token, total, *, participants, shares, note)` · `splits.get(id)` | `POST /v1/splits` · `GET /v1/splits/{id}` |
+| `splits.update(id, edit_token, *, note, labels, status)` | `PATCH /v1/splits/{id}` (`x-edit-token`) |
+| `tip_jars.get(address)` | `GET /v1/tip-jars/{address}` |
+| `payouts.plan(src_chain, src_token, sender, *, rows, csv)` · `payouts.transfers(chain, token, sender, transfers)` | `POST /v1/payouts/plan` · `/v1/payouts/transfers` |
 | `service_status()` | `GET /v1/status` (platform status, public) |
 | `webhooks.stream()` | `GET /v1/webhooks/stream` (SSE, API key) |
 | `webhooks.trigger(type)` | `POST /v1/webhooks/trigger` (test keys only) |
@@ -136,6 +150,106 @@ q = lh.quote("solana", "USDC", "100000000", "base", "USDC",
 goa = q["best"].get("gasOnArrival")
 if goa:
     print(goa["amount"], goa["symbol"], goa.get("usd"))  # e.g. 800000000000000 ETH 2.0
+```
+
+### Tron transactions
+
+On a Tron route, `build_tx` returns a `TronTx` (`tx["vm"] == "tvm"`, `chainId` `728126428`,
+`TRON_CHAIN_ID`). The SDK never signs: sign `tx["unsigned"]` unchanged with a Tron wallet (TronWeb,
+TronLink), send `tx["approval"]` first when present (its own transaction), broadcast before
+`raw_data["expiration"]`, then report the main transaction's `txID` (bare 64-hex, no `0x`).
+`simulate` reports `energyUsed` for Tron.
+
+```python
+tx = lh.build_tx(quote_id)
+if tx["vm"] == "tvm":
+    if tx.get("approval"):
+        ...  # sign and broadcast tx["approval"]["unsigned"] first
+    # sign and broadcast tx["unsigned"] with your Tron wallet, then:
+    lh.report_submitted(quote_id, tx["unsigned"]["txID"])
+```
+
+### Gasless swaps
+
+`gasless=True` asks for a swap where the wallet signs EIP-712 typed data instead of sending a
+transaction, and the provider's relayer takes the network fee from the input token (ERC-20 input,
+same EVM chain, when the deployment enables it). `build_tx` raises `ValueError` on a gasless quote.
+
+```python
+q = lh.quote("base", "USDC", "100000000", "base", "WETH", sender=addr, recipient=addr, gasless=True)
+g = lh.build_gasless(q["best"]["quoteId"])            # {"chainId", "approval"?, "trade", "gasFee"?}
+approval_sig = sign_typed_data(g["approval"]["eip712"]) if g.get("approval") else None  # your wallet
+trade_sig = sign_typed_data(g["trade"]["eip712"])     # sign the typed data unchanged
+lh.submit_gasless(q["best"]["quoteId"], trade_sig, approval_sig)
+lh.gasless_status(q["best"]["quoteId"])               # poll until "filled" or "failed"
+```
+
+### Destination calls
+
+`quote_calls` asks for an exact output that contract calls on the destination chain then use, run by
+the provider's executor (it is the calls' `msg.sender`). Send `calls` or an `action` preset. Quotes
+carry `srcAmount` (what the sender pays) and `calls` (the plan and its simulation).
+
+```python
+q = lh.quote_calls("arbitrum", "USDC", "base", "USDC", "100000000",  # exactly 100 USDC on Base
+                   sender="0xYou", recipient="0xYou", action={"type": "aave-v3-supply"})
+print(q["best"]["srcAmount"], q["best"]["calls"]["executor"])
+```
+
+### Referrals, tips and splits on a quote
+
+`quote` also takes `referrer` and `copy_of` (referral attribution only), and `purpose` (`tip`,
+`split`, `payout`, `gather`, `rebalance`, `fund`), `split_id` + `split_share` and `note` (140
+characters), recorded on the order. None of them change the fee or the route.
+
+## Tokens, prices and balances
+
+```python
+lh.tokens("base", q="usd")                           # one page of tokens
+page = lh.tokens_page("base", limit=50)              # {"tokens", "nextCursor"}
+lh.lookup_token("0x4200000000000000000000000000000000000006")          # chain found by the API
+lh.lookup_token("0x4200000000000000000000000000000000000006", "base")
+risk = lh.token_risk("base", "0x532f27101965dd16442E59d40670FaF5eBB142E4")
+if risk["level"] == "danger":
+    ...  # show risk["reasons"] and ask for an explicit confirmation
+lh.prices(["8453:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"])   # {"8453:0x8335...": 1.0}
+lh.balances("0xYou", ["base", "arbitrum"], fresh=True)        # balances, totalUsd, errors
+```
+
+Chains from `chains()` may carry `destinationOnly` (hide them from source pickers), `onlyRoute` (the
+one route into the chain) and `routeHealth` (`health["in"]`, `health["out"]`, `status`).
+
+## Splits, tip jars and payouts
+
+Public, no API key. A split divides a bill into shares that anyone pays with a normal quote
+(`purpose="split"`, `split_id`, `split_share`). Keep the `editToken` from `create`: it is shown once.
+
+```python
+s = lh.splits.create("alice.eth", "base", "USDC", "120000000", participants=4, note="Dinner")
+lh.splits.update(s["id"], s["editToken"], status="closed")   # note=None clears the note
+lh.splits.get(s["id"])["shares"]                              # unpaid / partial / paid
+lh.tip_jars.get("0xCreator")                                  # tippers, tips, messages
+```
+
+Payouts: `plan` checks rows (amounts in human units, e.g. `"25"`) and groups them; `transfers`
+builds unsigned batch transfers (EVM `calls` or a Solana `serializedTx`). The SDK never signs.
+
+```python
+plan = lh.payouts.plan("base", "USDC", "0xPayer",
+                       rows=[{"recipient": "bob.eth", "amount": "25", "token": "USDC", "chain": "base"}])
+t = lh.payouts.transfers("base", "USDC", "0xPayer", [{"recipient": "0x3333...", "amount": "25000000"}])
+```
+
+## Recurring orders (Solana)
+
+Recurring buys through Jupiter Recurring (beta, no LayerHop fee). `create` returns an unsigned tx
+and a `requestId`: have the wallet sign it (sign only), then `submit`.
+
+```python
+b = lh.recurring_orders.create("UserSolanaWallet", "SOL", "700000000", 7, 86400)  # 7 daily buys, 700 USDC
+lh.recurring_orders.submit(b["requestId"], signed_b64)        # {"txHash", "order"}
+lh.recurring_orders.list("UserSolanaWallet", status="active")
+c = lh.recurring_orders.cancel(order_id, "UserSolanaWallet")  # sign c["tx"], submit with c["requestId"]
 ```
 
 ## Live order status
@@ -361,6 +475,20 @@ try:
 except LayerHopApiError as e:
     if e.code == "QUOTE_EXPIRED":
         ...  # re-quote
+```
+
+`e.details` is the raw `error.details` object (or `None`). On `NO_ROUTE`, `e.suggestions()` lists
+alternative routes that quoted (`dst_token`, `src_token` or `via_hub` with `hub` and two `steps`),
+validated and at most 4. On `AMOUNT_TOO_SMALL`, `e.min_amount` (base units), `e.min_amount_usd` and
+`e.min_amount_approx` give the route's minimum when known. `e.provider_errors()` lists why each
+provider returned no quote.
+
+```python
+try:
+    lh.quote("base", "USDC", "1000000", "blast", "ETH", sender=a, recipient=b)
+except LayerHopApiError as e:
+    for s in e.suggestions():
+        print(s["kind"], s["message"])  # e.g. "Receive USDC on Ethereum instead"
 ```
 
 ## Webhooks
