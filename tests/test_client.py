@@ -64,6 +64,16 @@ def test_quote_gas_on_arrival(api):
         assert "gasOnArrival" not in p and "gasOnArrivalUsd" not in p
 
 
+def test_quote_avoid_lists(api):
+    api.on("GET", "/v1/quote", QUOTE_RESPONSE)
+    lh = make(api)
+    lh.quote("base", "USDC", "1", "arbitrum", "USDC", sender="0xs", recipient="0xr",
+             exclude_providers=["relay"], exclude_bridges=["stargate", "allbridge"], exclude_exchanges=[])
+    p = dict(api.last.url.params)
+    assert p["excludeProviders"] == "relay" and p["excludeBridges"] == "stargate,allbridge"
+    assert "excludeExchanges" not in p
+
+
 def test_extra_txs_on_evm_tx(api):
     tx = {**EVM_TX, "extraTxs": [{"to": "0xusdc", "data": "0xa9059cbb", "value": "0"}]}
     api.on("POST", "/v1/orders", {"tx": tx})

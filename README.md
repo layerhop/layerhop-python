@@ -75,7 +75,7 @@ async with AsyncLayerHop() as lh:
 | `token_risk(chain, address)` | `GET /v1/tokens/{chain}/{address}/risk` → the `risk` |
 | `prices(ids)` | `GET /v1/prices` → `{"chainId:address": usd}` |
 | `balances(address, chains=None, *, tokens, fresh)` | `GET /v1/balances` |
-| `quote(src_chain, src_token, amount, dst_chain, dst_token, *, sender, recipient, slippage_bps=50, gas_on_arrival=None, gasless=False, referrer, copy_of, purpose, split_id, split_share, note)` | `GET /v1/quote` |
+| `quote(src_chain, src_token, amount, dst_chain, dst_token, *, sender, recipient, slippage_bps=50, gas_on_arrival=None, gasless=False, referrer, copy_of, purpose, split_id, split_share, note, exclude_providers, exclude_bridges, exclude_exchanges)` | `GET /v1/quote` |
 | `quote_calls(src_chain, src_token, dst_chain, dst_token, dst_amount, *, sender, recipient, slippage_bps=50, calls, action, referrer, copy_of)` | `POST /v1/quote` (destination calls) |
 | `build_tx(quote_id)` | `POST /v1/orders` → the `tx` (EVM, Solana or Tron) |
 | `build_gasless(quote_id)` | `POST /v1/orders` → the `gasless` typed data to sign |

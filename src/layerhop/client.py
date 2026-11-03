@@ -176,6 +176,8 @@ class _Base:
         gas_on_arrival: Union[bool, float, None] = None, gasless: bool = False, referrer: Optional[str] = None,
         copy_of: Optional[str] = None, purpose: Optional[str] = None, split_id: Optional[str] = None,
         split_share: Optional[int] = None, note: Optional[str] = None,
+        exclude_providers: Optional[List[str]] = None, exclude_bridges: Optional[List[str]] = None,
+        exclude_exchanges: Optional[List[str]] = None,
     ) -> Dict[str, str]:
         if not isinstance(amount, str):
             raise TypeError("amount must be an integer string in base units (e.g. '100000000')")
@@ -199,6 +201,10 @@ class _Base:
                      ("splitShare", None if split_share is None else str(split_share)), ("note", note)):
             if v:
                 q[k] = v
+        for k, ids in (("excludeProviders", exclude_providers), ("excludeBridges", exclude_bridges),
+                       ("excludeExchanges", exclude_exchanges)):
+            if ids:
+                q[k] = ",".join(ids)
         return q
 
     def _quote_calls_body(
@@ -1537,7 +1543,8 @@ class LayerHop(_Base):
         *, sender: str, recipient: str, slippage_bps: int = 50, gas_on_arrival: Union[bool, float, None] = None,
         gasless: bool = False, referrer: Optional[str] = None, copy_of: Optional[str] = None,
         purpose: Optional[QuotePurpose] = None, split_id: Optional[str] = None, split_share: Optional[int] = None,
-        note: Optional[str] = None,
+        note: Optional[str] = None, exclude_providers: Optional[List[str]] = None,
+        exclude_bridges: Optional[List[str]] = None, exclude_exchanges: Optional[List[str]] = None,
     ) -> QuoteResponse:
         """Ask every provider; ``best`` is the highest output for the user. ``amount`` is base units.
 
@@ -1548,10 +1555,15 @@ class LayerHop(_Base):
         ``gasless=True`` asks for a gasless swap (ERC-20 input, same EVM chain): continue with
         :meth:`build_gasless`. ``referrer`` / ``copy_of`` are referral attribution only. ``purpose``
         (``tip``, ``split``, ``payout``, ``gather``, ``rebalance``, ``fund``), ``split_id`` +
-        ``split_share`` and ``note`` (140 chars) are recorded on the order; none of them change the fee."""
+        ``split_share`` and ``note`` (140 chars) are recorded on the order; none of them change the fee.
+
+        ``exclude_providers`` / ``exclude_bridges`` / ``exclude_exchanges`` (lists of ids, e.g.
+        ``["relay"]``, ``["stargate"]``, ``["1inch"]``) keep those out of every returned route; every
+        entry of ``quotes`` can be built with :meth:`build_tx`, not only ``best``."""
         return self._call("GET", "/quote", params=self._quote_params(
             src_chain, src_token, amount, dst_chain, dst_token, sender, recipient, slippage_bps, gas_on_arrival,
-            gasless, referrer, copy_of, purpose, split_id, split_share, note))
+            gasless, referrer, copy_of, purpose, split_id, split_share, note,
+            exclude_providers, exclude_bridges, exclude_exchanges))
 
     def quote_calls(
         self, src_chain: Union[str, int], src_token: str, dst_chain: Union[str, int], dst_token: str, dst_amount: str,
@@ -1735,11 +1747,13 @@ class AsyncLayerHop(_Base):
         *, sender: str, recipient: str, slippage_bps: int = 50, gas_on_arrival: Union[bool, float, None] = None,
         gasless: bool = False, referrer: Optional[str] = None, copy_of: Optional[str] = None,
         purpose: Optional[QuotePurpose] = None, split_id: Optional[str] = None, split_share: Optional[int] = None,
-        note: Optional[str] = None,
+        note: Optional[str] = None, exclude_providers: Optional[List[str]] = None,
+        exclude_bridges: Optional[List[str]] = None, exclude_exchanges: Optional[List[str]] = None,
     ) -> QuoteResponse:
         return await self._call("GET", "/quote", params=self._quote_params(
             src_chain, src_token, amount, dst_chain, dst_token, sender, recipient, slippage_bps, gas_on_arrival,
-            gasless, referrer, copy_of, purpose, split_id, split_share, note))
+            gasless, referrer, copy_of, purpose, split_id, split_share, note,
+            exclude_providers, exclude_bridges, exclude_exchanges))
 
     async def quote_calls(
         self, src_chain: Union[str, int], src_token: str, dst_chain: Union[str, int], dst_token: str, dst_amount: str,
