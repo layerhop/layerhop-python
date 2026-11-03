@@ -87,7 +87,7 @@ from .types import (
 
 DEFAULT_BASE_URL = "https://api.layerhop.com"
 DEFAULT_TIMEOUT = 30.0
-__version__ = "0.7.0"
+__version__ = "0.8.0"
 
 
 PriceId = Union[str, Tuple[Union[str, int], str], Dict[str, Any]]
