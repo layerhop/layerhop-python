@@ -159,6 +159,7 @@ class Quote(TypedDict):
     expiresAt: int
     gasOnArrival: NotRequired[GasOnArrival]  # Present when gas on arrival was requested and this route includes it.
     srcAmount: NotRequired[str]  # What the sender pays (base units), on destination-call and checkout quotes.
+    srcAmountMax: NotRequired[str]  # Exact-output quotes: the most the tx can take from the sender (balance checks).
     calls: NotRequired["DestinationCallsPlan"]  # Destination calls the provider will run (``quote_calls``).
     gasless: NotRequired["GaslessQuoteInfo"]  # Gasless quotes only (``gasless=True``).
 

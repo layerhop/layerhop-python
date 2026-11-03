@@ -1561,7 +1561,11 @@ class LayerHop(_Base):
         """Destination calls (``POST /v1/quote``): an exact-output quote whose ``dst_amount`` of
         ``dst_token`` is used by ``calls`` (``{"to", "data", "value"?}``) or an ``action`` preset
         (``{"type": "aave-v3-supply"}``) on the destination chain, run by the provider's executor (the
-        calls' ``msg.sender``). Quotes carry ``srcAmount`` (what the sender pays) and ``calls``."""
+        calls' ``msg.sender``). Quotes carry ``srcAmount`` (what the sender pays) and ``calls``.
+
+        Without ``calls`` and ``action`` this is a plain exact-output quote ("receive exact amount"):
+        ``dst_amount`` is what the recipient gets, and quotes carry ``srcAmount`` and ``srcAmountMax``
+        (the most the tx can take from the sender)."""
         return self._call("POST", "/quote", json=self._quote_calls_body(
             src_chain, src_token, dst_chain, dst_token, dst_amount, sender, recipient, slippage_bps, calls, action,
             referrer, copy_of))

@@ -126,6 +126,17 @@ def test_quote_calls_body(api):
         make(api).quote_calls("base", "USDC", "base", "USDC", 5, sender="a", recipient="b")  # type: ignore[arg-type]
 
 
+def test_quote_calls_exact_output(api):
+    xq = {**QUOTE, "srcAmount": "10070351", "srcAmountMax": "10070351"}
+    api.on("POST", "/v1/quote", {**QUOTE_RESPONSE, "best": xq, "quotes": [xq]})
+    r = make(api).quote_calls("base", "USDC", "arbitrum", "USDC", "10000000", sender="0xs", recipient="0xr")
+    assert api.last_json() == {
+        "srcChain": "base", "srcToken": "USDC", "dstChain": "arbitrum", "dstToken": "USDC", "dstAmount": "10000000",
+        "sender": "0xs", "recipient": "0xr", "slippageBps": 50, "channel": "api",
+    }
+    assert r["best"]["srcAmount"] == "10070351" and r["best"]["srcAmountMax"] == "10070351"
+
+
 def test_gasless_build_submit_status(api):
     api.on("POST", "/v1/orders", {"quoteId": "q_g", "provider": "zerox", "gasless": GASLESS})
     api.on("POST", "/v1/orders/gasless", GASLESS_STATUS)
