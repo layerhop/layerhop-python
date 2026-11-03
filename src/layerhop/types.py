@@ -20,18 +20,56 @@ ProviderId = str
 ``sandbox`` (every request made with an ``lh_test_`` key) | ``direct`` (a plain transfer, used by checkout)"""
 
 FeeChannel = Literal["web", "widget", "bot", "api"]
-OrderState = Literal["pending", "filled", "refunded", "failed", "unknown"]
-FINAL_STATES = frozenset({"filled", "refunded", "failed"})
+OrderState = Literal["pending", "filled", "refunded", "failed", "unknown", "dropped"]
+"""``dropped``: the source transaction never reached the network (no funds moved); final."""
+FINAL_STATES = frozenset({"filled", "refunded", "failed", "dropped"})
+
+Vm = Literal["evm", "svm", "tvm"]
+"""Virtual machine family: ``svm`` is Solana, ``tvm`` is Tron."""
+
+ErrorCode = Literal[
+    "INVALID_PARAMS", "UNSUPPORTED_CHAIN", "UNSUPPORTED_TOKEN", "AMOUNT_TOO_SMALL", "AMOUNT_TOO_LARGE",
+    "CALLS_REVERTED", "LAUNCH_IMAGE_INVALID", "NO_ROUTE", "QUOTE_NOT_FOUND", "QUOTE_EXPIRED", "ORDER_NOT_FOUND",
+    "PROVIDER_ERROR", "PROVIDER_TIMEOUT", "RATE_LIMITED", "QUOTA_EXCEEDED", "UNAUTHORIZED", "FORBIDDEN",
+    "NOT_FOUND", "CONFLICT", "GASLESS_PENDING", "GASLESS_FAILED", "INTERNAL",
+]
+"""Stable error codes (``LayerHopApiError.code`` is a plain ``str``, so new codes still decode)."""
+
+RouteHealthState = Literal["ok", "failing", "unknown"]
+
+
+ChainRouteHealth = TypedDict("ChainRouteHealth", {
+    "in": str,  # A :data:`RouteHealthState`: probe quotes into the chain.
+    "out": str,  # A :data:`RouteHealthState`: probe quotes out of the chain.
+    "status": str,  # ``ok`` | ``deposit_only`` | ``withdraw_only`` | ``unavailable`` | ``unknown``
+    "checkedAt": NotRequired[str],
+})
+"""LayerHop's periodic read-only probe quotes of a chain (read ``health["in"]``)."""
+
+
+class OnlyRoute(TypedDict):
+    """The one fixed route into a chain (e.g. Blast: ETH on Ethereum only)."""
+
+    srcChainId: int
+    srcToken: str
+    dstToken: str
 
 
 class Chain(TypedDict):
     id: int
     slug: str
     name: str
-    vm: Literal["evm", "svm"]
+    vm: Vm
     nativeSymbol: str
     nativeDecimals: int
     explorerTx: str
+    logoURI: NotRequired[str]
+    explorerAddress: NotRequired[str]
+    providers: NotRequired[List[str]]
+    popular: NotRequired[bool]
+    destinationOnly: NotRequired[bool]  # Deliver-only chains (e.g. Hyperliquid, Blast): hide from source pickers.
+    onlyRoute: NotRequired[OnlyRoute]
+    routeHealth: NotRequired[ChainRouteHealth]
 
 
 class Token(TypedDict):
@@ -39,6 +77,57 @@ class Token(TypedDict):
     address: str
     symbol: str
     decimals: int
+    name: NotRequired[str]
+    logoURI: NotRequired[str]
+    priceUsd: NotRequired[float]
+    verified: NotRequired[bool]  # On a provider list or LayerHop's curated list; ``False`` for on-chain-only tokens.
+    popular: NotRequired[bool]
+
+
+class TokensPage(TypedDict):
+    tokens: List[Token]
+    nextCursor: Optional[str]  # Pass as ``cursor`` for the next page; ``None`` on the last page.
+
+
+TokenRiskLevel = Literal["ok", "caution", "danger", "unknown"]
+
+
+class TokenRiskReason(TypedDict):
+    code: str  # e.g. ``honeypot``, ``sell_tax``, ``mintable`` (new codes may appear).
+    level: str  # ``caution`` | ``danger``
+    message: str
+    value: NotRequired[float]  # Percent for taxes / transfer fees; holder count for ``few_holders``.
+
+
+class TokenRisk(TypedDict):
+    """A token's safety report. Show ``danger`` prominently and ask for a confirmation before a buy."""
+
+    chainId: int
+    address: str
+    level: str  # A :data:`TokenRiskLevel`.
+    verified: bool
+    symbol: NotRequired[str]
+    reasons: List[TokenRiskReason]
+    source: str  # ``list`` | ``goplus`` | ``none``
+    checkedAt: str
+
+
+class Balance(Token):
+    amount: str  # Base units.
+    valueUsd: NotRequired[float]
+
+
+class BalanceError(TypedDict):
+    chainId: int
+    message: str
+
+
+class BalancesResponse(TypedDict):
+    address: str
+    vm: Vm
+    balances: List[Balance]  # Highest USD value first.
+    totalUsd: float
+    errors: List[BalanceError]  # Chains (or requested tokens) that could not be read.
 
 
 class FeeBreakdown(TypedDict):
@@ -69,6 +158,50 @@ class Quote(TypedDict):
     fees: FeeBreakdown
     expiresAt: int
     gasOnArrival: NotRequired[GasOnArrival]  # Present when gas on arrival was requested and this route includes it.
+    srcAmount: NotRequired[str]  # What the sender pays (base units), on destination-call and checkout quotes.
+    calls: NotRequired["DestinationCallsPlan"]  # Destination calls the provider will run (``quote_calls``).
+    gasless: NotRequired["GaslessQuoteInfo"]  # Gasless quotes only (``gasless=True``).
+
+
+class GasFee(TypedDict):
+    amount: str  # Base units of ``token``.
+    token: str  # The input token.
+
+
+class GaslessQuoteInfo(TypedDict):
+    """On gasless quotes only. ``dstAmount`` already accounts for the gas fee."""
+
+    gasFee: NotRequired[GasFee]  # Network fee the provider's relayer takes from the input token.
+    approval: bool  # ``True`` when the wallet signs a gasless approval (permit) before the trade.
+
+
+class DestinationCall(TypedDict):
+    """One contract call on the destination chain (``value`` in wei, native outputs only)."""
+
+    to: str
+    data: str
+    value: NotRequired[str]
+
+
+class DestinationCallsSimulation(TypedDict):
+    ok: bool
+    gasUsed: str
+    leftover: NotRequired[str]
+
+
+class DestinationCallsPlan(TypedDict):
+    """The calls a quote's provider committed to run, and their pre-quote simulation."""
+
+    items: List[EvmCall]
+    executor: str  # Contract that receives the output and makes the calls (their ``msg.sender``).
+    executed: bool
+    simulation: NotRequired[DestinationCallsSimulation]
+
+
+class DestinationAction(TypedDict):
+    """A preset that builds the calls server-side: ``{"type": "aave-v3-supply"}``."""
+
+    type: str
 
 
 class ProviderError(TypedDict):
@@ -116,7 +249,50 @@ class SvmTx(TypedDict):
     sandbox: NotRequired[bool]  # Test mode only: a placeholder that can never land. Never broadcast it.
 
 
-BuiltTx = Union[EvmTx, SvmTx]
+class TronCall(TypedDict):
+    """One Tron smart-contract call. Addresses are base58 T-addresses; ``value`` and ``feeLimit`` are sun."""
+
+    to: str
+    data: str  # ABI calldata, ``0x`` hex.
+    value: str
+    feeLimit: str  # The most TRX (sun) the network may burn for this call's energy.
+
+
+class TronUnsignedTx(TypedDict):
+    """An unsigned Tron transaction exactly as the node built it (TronWeb's transaction object).
+    Sign it unchanged and broadcast it before ``raw_data["expiration"]``."""
+
+    txID: str  # The tx hash once broadcast: bare 64-hex, no ``0x``.
+    raw_data_hex: str
+    raw_data: Dict[str, Any]  # Decoded raw data (free-form JSON): keep it as-is.
+    visible: NotRequired[bool]
+
+
+class TronApproval(TypedDict):
+    """TRC-20 approval to send before the main call (its own transaction)."""
+
+    token: str
+    spender: str
+    amount: str
+    call: TronCall
+    unsigned: NotRequired[TronUnsignedTx]
+
+
+TronTx = TypedDict("TronTx", {
+    "vm": Literal["tvm"],
+    "chainId": int,  # 728126428
+    "from": str,  # Owner (signer) of every call, T-address.
+    "call": TronCall,
+    "unsigned": NotRequired[TronUnsignedTx],
+    "approval": NotRequired[TronApproval],
+    "sandbox": NotRequired[bool],  # Test mode only: a placeholder that moves no funds. Never broadcast it.
+})
+"""Tron transaction(s) for a quote. The SDK never signs: sign ``unsigned`` unchanged with a Tron
+wallet (TronWeb / TronLink), send ``approval`` first when present, broadcast before
+``raw_data["expiration"]``, then ``report_submitted`` with the main tx's ``txID`` (bare 64-hex)."""
+
+
+BuiltTx = Union[EvmTx, SvmTx, TronTx]
 
 
 class OrderStatus(TypedDict):
@@ -142,8 +318,9 @@ class SimulateResponse(TypedDict):
     quoteId: str
     provider: ProviderId
     ok: bool
-    vm: Literal["evm", "svm"]
+    vm: Vm
     gasEstimate: NotRequired[str]
+    energyUsed: NotRequired[int]  # Tron: energy the simulated call used.
     computeUnits: NotRequired[int]
     needsApproval: NotRequired[bool]
     simulated: NotRequired[Literal["tx", "approval"]]
@@ -267,7 +444,8 @@ class CheckoutProductsPage(TypedDict):
 
 
 class CheckoutQuote(Quote):
-    srcAmount: str  # What the payer sends, base units of the chosen token.
+    """A checkout quote. ``srcAmount`` (what the payer sends, base units of the chosen token) is
+    always present."""
 
 
 class CheckoutQuoteResponse(TypedDict):
@@ -280,7 +458,7 @@ class CheckoutQuoteResponse(TypedDict):
 
 
 WebhookEventType = Literal[
-    "order.submitted", "order.filled", "order.refunded", "order.failed",
+    "order.submitted", "order.filled", "order.refunded", "order.failed", "order.dropped",
     "checkout.session.processing", "checkout.session.completed", "checkout.session.payment_failed",
     "checkout.session.expired", "checkout.session.refunded", "invoice.sent", "invoice.paid",
     "subscription.created", "subscription.renewed", "subscription.past_due", "subscription.canceled",
@@ -613,6 +791,249 @@ class StatusResponse(TypedDict):
     components: List[StatusComponent]
     incidents: List[StatusIncident]  # The last 14 days.
     url: str
+
+
+class Eip712TypedData(TypedDict):
+    """EIP-712 typed data exactly as the provider returned it. Sign it unchanged
+    (``eth_account``'s ``sign_typed_data`` / ``eth_signTypedData_v4``)."""
+
+    types: Dict[str, Any]
+    domain: Dict[str, Any]
+    message: Dict[str, Any]
+    primaryType: str
+
+
+class GaslessSignable(TypedDict):
+    type: str  # Provider's kind, e.g. ``permit`` (approvals) or ``settler_metatransaction`` (trade).
+    eip712: Eip712TypedData
+
+
+class GaslessSignRequest(TypedDict):
+    """What the wallet signs for a gasless quote: ``approval`` (when present) and ``trade``, on ``chainId``."""
+
+    chainId: int
+    approval: NotRequired[GaslessSignable]
+    trade: GaslessSignable
+    gasFee: NotRequired[GasFee]
+
+
+class GaslessOrderStatus(TypedDict):
+    """State of a submitted gasless order (``srcTxHash`` once the relayer's tx is mined)."""
+
+    quoteId: str
+    provider: ProviderId
+    orderId: str
+    state: OrderState
+    srcTxHash: NotRequired[str]
+    reason: NotRequired[str]  # Provider failure reason when ``failed``.
+
+
+QuotePurpose = Literal["tip", "split", "payout", "gather", "rebalance", "fund"]
+
+
+class RouteLeg(TypedDict):
+    """One quotable leg, in the same terms as a quote request. Amounts are base units."""
+
+    srcChain: int
+    srcToken: str
+    amount: str
+    dstChain: int
+    dstToken: str
+    dstAmount: NotRequired[str]  # Estimated output (quote again before signing).
+
+
+class RouteHub(TypedDict):
+    chainId: int
+    token: str
+    symbol: str
+    decimals: int
+
+
+class RouteSuggestion(RouteLeg):
+    """An alternative to a route that returned no quote (``NO_ROUTE``). ``dst_token``: another
+    destination token. ``src_token``: another source token worth the same. ``via_hub``: two signed
+    steps through ``hub`` (``steps[0]`` then ``steps[1]``); the top-level fields describe the whole trip."""
+
+    kind: str  # ``dst_token`` | ``src_token`` | ``via_hub``
+    message: str  # Short text for a button.
+    symbol: NotRequired[str]
+    hub: NotRequired[RouteHub]
+    steps: NotRequired[List[RouteLeg]]
+
+
+SplitStatus = Literal["open", "closed"]
+
+
+class SplitShare(TypedDict):
+    index: int  # ``split_share`` on quotes.
+    label: str
+    amount: str  # Base units of the split's token.
+    received: str
+    status: str  # ``unpaid`` | ``partial`` | ``paid``
+    payments: int
+    pending: int
+
+
+class SplitToken(TypedDict):
+    address: str
+    symbol: str
+    decimals: int
+
+
+class Split(TypedDict):
+    """A bill split: shares of ``total`` that anyone pays with a quote (``purpose="split"``)."""
+
+    id: str
+    url: str
+    status: SplitStatus
+    note: Optional[str]
+    recipient: str
+    recipientName: Optional[str]
+    chainId: int
+    chain: str
+    token: SplitToken
+    total: str  # Base units.
+    collected: str
+    paidCount: int
+    shares: List[SplitShare]
+    createdAt: str
+    updatedAt: str
+
+
+class SplitCreated(Split):
+    editToken: str  # The edit secret, shown only once: keep it to update the split.
+    editUrl: str
+
+
+class SplitShareInput(TypedDict, total=False):
+    label: str
+    amount: str  # Base units (all shares or none; they must add up to ``total``).
+
+
+class TipJarMessage(TypedDict):
+    text: str
+    at: str
+
+
+class TipJar(TypedDict):
+    address: str
+    tippers: int
+    tips: int
+    messages: List[TipJarMessage]  # At most 10.
+
+
+class PayoutRowInput(TypedDict):
+    recipient: str  # Address, ENS name or .sol name.
+    amount: Union[str, float]  # HUMAN units of ``token`` ("25", "0.5").
+    token: str
+    chain: Union[str, int]
+    label: NotRequired[str]
+
+
+class PayoutToken(TypedDict):
+    chainId: int
+    address: str
+    symbol: str
+    decimals: int
+    usd: NotRequired[float]
+
+
+class PayoutPlan(TypedDict):
+    """``POST /v1/payouts/plan``: rows resolved and grouped into transfer batches and routed rows."""
+
+    source: Dict[str, Any]  # ``{chainId, chain, sender, token}``
+    rows: List[Dict[str, Any]]  # ``{index, line, input, ok, error?, recipient?, chainId?, chain?, token?, amount?, kind?}``
+    transfers: List[Dict[str, Any]]  # ``{chainId, token, rows, total}``
+    routes: List[Dict[str, Any]]  # ``{chainId, rows}``
+    transferTotal: str
+    totals: List[Dict[str, Any]]
+    valid: int
+    invalid: int
+    warnings: List[str]
+
+
+class PayoutTransfer(TypedDict):
+    recipient: str  # An address (resolve names with the plan first).
+    amount: str  # Base units.
+
+
+class PayoutTransfers(TypedDict):
+    """Unsigned transfers: EVM ``calls`` (one per transfer) or a Solana ``serializedTx``. Never signed by LayerHop."""
+
+    vm: Literal["evm", "svm"]
+    chainId: int
+    token: PayoutToken
+    calls: NotRequired[List[EvmCall]]
+    serializedTx: NotRequired[str]
+
+
+class RecurringOrderBuild(TypedDict):
+    """``recurring_orders.create``: the unsigned ``tx`` for ``wallet`` to sign, and the ``requestId``."""
+
+    object: Literal["recurring_order_build"]
+    livemode: bool
+    provider: str  # ``jupiter`` (live) or ``sandbox`` (test mode).
+    chainId: int
+    wallet: str
+    srcToken: str
+    dstToken: str
+    amount: str
+    amountPerOrder: str
+    orders: int
+    intervalSeconds: int
+    fees: Dict[str, int]  # Always 0.
+    requestId: str
+    tx: SvmTx
+
+
+class RecurringOrderFill(TypedDict):
+    txHash: str
+    amount: str
+    dstAmount: str
+    feeAmount: str
+    feeToken: Optional[str]
+    filledAt: Optional[str]
+
+
+class RecurringOrder(TypedDict):
+    """A Solana recurring order (Jupiter Recurring), read live from Jupiter. Base units throughout."""
+
+    id: str
+    object: Literal["recurring_order"]
+    provider: str
+    chainId: int
+    status: str  # ``active`` | ``completed`` | ``cancelled``
+    wallet: str
+    srcToken: str
+    dstToken: str
+    amount: str
+    amountPerOrder: str
+    orders: int
+    ordersFilled: int
+    intervalSeconds: int
+    spentAmount: str
+    withdrawnAmount: str
+    receivedAmount: str
+    openTxHash: Optional[str]
+    closeTxHash: Optional[str]
+    createdAt: Optional[str]
+    fills: List[RecurringOrderFill]
+
+
+class RecurringOrderList(TypedDict):
+    recurringOrders: List[RecurringOrder]
+    page: int
+    totalPages: int
+
+
+class RecurringOrderSubmitResponse(TypedDict):
+    txHash: str
+    order: Optional[str]  # The order account (create).
+
+
+class RecurringOrderCancelResponse(TypedDict):
+    requestId: str
+    tx: SvmTx
 
 
 Json = Dict[str, Any]

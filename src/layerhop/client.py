@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import json as _json
 import time
-from typing import Any, AsyncIterator, Dict, Iterator, List, Optional, Union
+from typing import Any, AsyncIterator, Dict, Iterator, List, Optional, Sequence, Tuple, Union
 from urllib.parse import quote as _urlquote
 
 import httpx
@@ -17,6 +17,7 @@ import httpx
 from .errors import LayerHopApiError
 from .types import (
     FINAL_STATES,
+    BalancesResponse,
     BuiltTx,
     Chain,
     CheckoutProduct,
@@ -31,7 +32,11 @@ from .types import (
     DepositAddressesPage,
     DepositAddressStatus,
     DepositAddressWithDeposits,
+    DestinationAction,
+    DestinationCall,
     FeeChannel,
+    GaslessOrderStatus,
+    GaslessSignRequest,
     Invoice,
     InvoiceLineItem,
     InvoicePayResponse,
@@ -47,19 +52,34 @@ from .types import (
     Order,
     OrdersPage,
     OrderStatus,
+    PayoutPlan,
+    PayoutRowInput,
+    PayoutTransfer,
+    PayoutTransfers,
     PublicInvoice,
+    QuotePurpose,
     QuoteResponse,
+    RecurringOrderBuild,
+    RecurringOrderCancelResponse,
+    RecurringOrderList,
+    RecurringOrderSubmitResponse,
     Refund,
     RefundCreateResponse,
     ReportSubmittedResponse,
     SimulateDepositResponse,
     SimulateResponse,
+    Split,
+    SplitCreated,
+    SplitShareInput,
     StatusResponse,
     Subscription,
     SubscriptionInterval,
     SubscriptionsPage,
     SubscriptionStatus,
+    TipJar,
     Token,
+    TokenRisk,
+    TokensPage,
     TriggerWebhookResponse,
     WebhookEvent,
     WebhookEventType,
@@ -67,7 +87,11 @@ from .types import (
 
 DEFAULT_BASE_URL = "https://api.layerhop.com"
 DEFAULT_TIMEOUT = 30.0
-__version__ = "0.6.0"
+__version__ = "0.7.0"
+
+
+PriceId = Union[str, Tuple[Union[str, int], str], Dict[str, Any]]
+"""A token for ``prices`` / ``balances``: ``"chainId:address"``, ``(chain_id, address)`` or ``{"chainId", "address"}``."""
 
 
 def _seg(v: str) -> str:
@@ -149,7 +173,9 @@ class _Base:
     def _quote_params(
         self, src_chain: Union[str, int], src_token: str, amount: str, dst_chain: Union[str, int],
         dst_token: str, sender: str, recipient: str, slippage_bps: int,
-        gas_on_arrival: Union[bool, float, None] = None,
+        gas_on_arrival: Union[bool, float, None] = None, gasless: bool = False, referrer: Optional[str] = None,
+        copy_of: Optional[str] = None, purpose: Optional[str] = None, split_id: Optional[str] = None,
+        split_share: Optional[int] = None, note: Optional[str] = None,
     ) -> Dict[str, str]:
         if not isinstance(amount, str):
             raise TypeError("amount must be an integer string in base units (e.g. '100000000')")
@@ -167,7 +193,158 @@ class _Base:
                 q["gasOnArrival"] = "true"
         elif gas_on_arrival is not None:
             q["gasOnArrivalUsd"] = format(gas_on_arrival, "g")
+        if gasless:
+            q["gasless"] = "true"
+        for k, v in (("referrer", referrer), ("copyOf", copy_of), ("purpose", purpose), ("splitId", split_id),
+                     ("splitShare", None if split_share is None else str(split_share)), ("note", note)):
+            if v:
+                q[k] = v
         return q
+
+    def _quote_calls_body(
+        self, src_chain: Union[str, int], src_token: str, dst_chain: Union[str, int], dst_token: str,
+        dst_amount: str, sender: str, recipient: str, slippage_bps: int, calls: Optional[List[DestinationCall]],
+        action: Optional[DestinationAction], referrer: Optional[str], copy_of: Optional[str],
+    ) -> Dict[str, Any]:
+        if not isinstance(dst_amount, str):
+            raise TypeError("dst_amount must be an integer string in base units (e.g. '100000000')")
+        b: Dict[str, Any] = {
+            "srcChain": str(src_chain), "srcToken": src_token, "dstChain": str(dst_chain), "dstToken": dst_token,
+            "dstAmount": dst_amount, "sender": sender, "recipient": recipient, "slippageBps": slippage_bps,
+            "channel": self.channel,
+        }
+        for k, v in (("calls", calls), ("action", action), ("integrator", self.integrator or None),
+                     ("integratorFeeBps", self.integrator_fee_bps), ("referrer", referrer or None),
+                     ("copyOf", copy_of or None)):
+            if v is not None:
+                b[k] = v
+        return b
+
+    @staticmethod
+    def _tokens_params(chain: Union[str, int], q: Optional[str], limit: Optional[int], cursor: Optional[str]) -> Dict[str, str]:
+        p = {"chain": str(chain)}
+        if q:
+            p["q"] = q
+        if limit is not None:
+            p["limit"] = str(limit)
+        if cursor:
+            p["cursor"] = cursor
+        return p
+
+    @staticmethod
+    def _lookup_params(address: str, chain: Union[str, int, None]) -> Dict[str, str]:
+        p = {"address": address}
+        if chain is not None and chain != "":
+            p["chain"] = str(chain)
+        return p
+
+    @staticmethod
+    def _price_id(i: PriceId) -> str:
+        if isinstance(i, str):
+            return i
+        if isinstance(i, dict):
+            return f"{i['chainId']}:{i['address']}"
+        return f"{i[0]}:{i[1]}"
+
+    @staticmethod
+    def _balances_params(
+        address: str, chains: Optional[Sequence[Union[str, int]]], tokens: Optional[Sequence[PriceId]], fresh: bool,
+    ) -> Dict[str, str]:
+        p = {"address": address}
+        if chains:
+            p["chains"] = ",".join(str(c) for c in chains)
+        if tokens:
+            p["tokens"] = ",".join(_Base._price_id(t) for t in tokens)
+        if fresh:
+            p["fresh"] = "1"
+        return p
+
+    @staticmethod
+    def _build_tx_result(r: Dict[str, Any]) -> BuiltTx:
+        if "tx" not in r and r.get("gasless") is not None:
+            raise ValueError("This quote is gasless; use build_gasless")
+        return r["tx"]
+
+    @staticmethod
+    def _gasless_result(r: Dict[str, Any]) -> GaslessSignRequest:
+        g = r.get("gasless")
+        if g is None:
+            raise ValueError("This quote is not gasless; use build_tx")
+        return g
+
+    @staticmethod
+    def _gasless_submit_body(quote_id: str, trade_signature: str, approval_signature: Optional[str]) -> Dict[str, Any]:
+        sigs = {"trade": trade_signature}
+        if approval_signature is not None:
+            sigs["approval"] = approval_signature
+        return {"quoteId": quote_id, "signatures": sigs}
+
+    @staticmethod
+    def _split_create_body(
+        recipient: str, chain: Union[str, int], token: str, total: str, participants: Optional[int],
+        shares: Optional[List[SplitShareInput]], note: Optional[str],
+    ) -> Dict[str, Any]:
+        if not isinstance(total, str):
+            raise TypeError("total must be an integer string in base units (e.g. '120000000')")
+        b: Dict[str, Any] = {"recipient": recipient, "chain": str(chain), "token": token, "total": total}
+        for k, v in (("participants", participants), ("shares", shares), ("note", note)):
+            if v is not None:
+                b[k] = v
+        return b
+
+    @staticmethod
+    def _split_update_body(note: Any, labels: Any, status: Any) -> Dict[str, Any]:
+        b: Dict[str, Any] = {}
+        for k, v in (("note", note), ("labels", labels), ("status", status)):
+            if v is not _UNSET:
+                b[k] = v
+        return b
+
+    @staticmethod
+    def _payout_plan_body(
+        src_chain: Union[str, int], src_token: str, sender: str, rows: Optional[List[PayoutRowInput]], csv: Optional[str],
+    ) -> Dict[str, Any]:
+        b: Dict[str, Any] = {"srcChain": str(src_chain), "srcToken": src_token, "sender": sender}
+        if rows is not None:
+            b["rows"] = rows
+        if csv is not None:
+            b["csv"] = csv
+        return b
+
+    @staticmethod
+    def _payout_transfers_body(
+        chain: Union[str, int], token: str, sender: str, transfers: List[PayoutTransfer],
+    ) -> Dict[str, Any]:
+        for t in transfers:
+            if not isinstance(t.get("amount"), str):
+                raise TypeError("transfer amounts must be integer strings in base units (e.g. '250000000')")
+        return {"chain": str(chain), "token": token, "sender": sender, "transfers": transfers}
+
+    @staticmethod
+    def _recurring_order_body(
+        wallet: str, dst_token: str, amount: str, orders: int, interval_seconds: int,
+        src_token: Optional[str], chain: Union[str, int, None],
+    ) -> Dict[str, Any]:
+        if not isinstance(amount, str):
+            raise TypeError("amount must be an integer string in base units (e.g. '100000000')")
+        b: Dict[str, Any] = {
+            "wallet": wallet, "dstToken": dst_token, "amount": amount, "orders": orders,
+            "intervalSeconds": interval_seconds,
+        }
+        if src_token is not None:
+            b["srcToken"] = src_token
+        if chain is not None:
+            b["chain"] = str(chain)
+        return b
+
+    @staticmethod
+    def _recurring_list_params(wallet: str, status: Optional[str], page: Optional[int]) -> Dict[str, str]:
+        p = {"wallet": wallet}
+        if status:
+            p["status"] = status
+        if page is not None:
+            p["page"] = str(page)
+        return p
 
     @staticmethod
     def _orders_params(address: Optional[str], status: Optional[str], cursor: Optional[str], limit: Optional[int]) -> Dict[str, str]:
@@ -388,6 +565,7 @@ class _Base:
             status=res.status_code,
             request_id=err.get("requestId") or res.headers.get("x-request-id"),
             docs_url=err.get("docsUrl"),
+            details=err.get("details") if isinstance(err.get("details"), dict) else None,
         )
 
 
@@ -851,6 +1029,184 @@ class AsyncLimitOrders:
         return await self._c._call("POST", f"/limit-orders/{_seg(id)}/simulate", json={"outcome": outcome})
 
 
+class RecurringOrders:
+    """Solana recurring buys (beta, Jupiter Recurring, no LayerHop fee), as ``LayerHop.recurring_orders``.
+
+    ``create`` returns an unsigned ``tx`` and a ``requestId``: have ``wallet`` sign the tx (sign only;
+    the SDK never signs), then ``submit(request_id, signed_b64)``. ``cancel`` returns the cancel tx and
+    its ``requestId``, submitted the same way. Nothing is stored by LayerHop.
+    """
+
+    def __init__(self, client: "LayerHop") -> None:
+        self._c = client
+
+    def create(
+        self, wallet: str, dst_token: str, amount: str, orders: int, interval_seconds: int, *,
+        src_token: Optional[str] = None, chain: Union[str, int, None] = None,
+    ) -> RecurringOrderBuild:
+        """Spend ``amount`` (the whole budget, base units of ``src_token``, default USDC) on ``orders``
+        buys of ``dst_token``, one every ``interval_seconds`` (86400 = daily). ``chain`` is ``solana`` only."""
+        return self._c._call("POST", "/recurring-orders", json=_Base._recurring_order_body(
+            wallet, dst_token, amount, orders, interval_seconds, src_token, chain))
+
+    def submit(self, request_id: str, signed_transaction: str) -> RecurringOrderSubmitResponse:
+        """Send the wallet-signed create or cancel tx (base64) with its ``requestId``."""
+        return self._c._call("POST", "/recurring-orders/submit",
+                             json={"requestId": request_id, "signedTransaction": signed_transaction})
+
+    def list(self, wallet: str, *, status: Optional[str] = None, page: Optional[int] = None) -> RecurringOrderList:
+        """The wallet's orders: ``status`` ``active`` (default) or ``history``; ``page`` from 1."""
+        return self._c._call("GET", "/recurring-orders", params=_Base._recurring_list_params(wallet, status, page))
+
+    def cancel(self, id: str, wallet: str) -> RecurringOrderCancelResponse:
+        """The cancel tx (unsigned) for ``wallet`` to sign and ``submit``; the unspent budget returns to it."""
+        return self._c._call("POST", f"/recurring-orders/{_seg(id)}/cancel", json={"wallet": wallet})
+
+
+class AsyncRecurringOrders:
+    """Recurring orders, as ``AsyncLayerHop.recurring_orders``. Same methods as :class:`RecurringOrders`."""
+
+    def __init__(self, client: "AsyncLayerHop") -> None:
+        self._c = client
+
+    async def create(
+        self, wallet: str, dst_token: str, amount: str, orders: int, interval_seconds: int, *,
+        src_token: Optional[str] = None, chain: Union[str, int, None] = None,
+    ) -> RecurringOrderBuild:
+        return await self._c._call("POST", "/recurring-orders", json=_Base._recurring_order_body(
+            wallet, dst_token, amount, orders, interval_seconds, src_token, chain))
+
+    async def submit(self, request_id: str, signed_transaction: str) -> RecurringOrderSubmitResponse:
+        return await self._c._call("POST", "/recurring-orders/submit",
+                                   json={"requestId": request_id, "signedTransaction": signed_transaction})
+
+    async def list(self, wallet: str, *, status: Optional[str] = None, page: Optional[int] = None) -> RecurringOrderList:
+        return await self._c._call("GET", "/recurring-orders", params=_Base._recurring_list_params(wallet, status, page))
+
+    async def cancel(self, id: str, wallet: str) -> RecurringOrderCancelResponse:
+        return await self._c._call("POST", f"/recurring-orders/{_seg(id)}/cancel", json={"wallet": wallet})
+
+
+class Splits:
+    """Bill splits, as ``LayerHop.splits`` (public, no API key). Each share is paid with a normal quote
+    (``purpose="split"``, ``split_id``, ``split_share``) that delivers the split's token to its recipient.
+
+    ``create`` returns an ``editToken`` shown only once: keep it to ``update`` the split.
+    """
+
+    def __init__(self, client: "LayerHop") -> None:
+        self._c = client
+
+    def create(
+        self, recipient: str, chain: Union[str, int], token: str, total: str, *, participants: Optional[int] = None,
+        shares: Optional[List[SplitShareInput]] = None, note: Optional[str] = None,
+    ) -> SplitCreated:
+        """Split ``total`` (base units of ``token``) into ``participants`` equal shares, or ``shares``
+        (``{"label", "amount"}``; amounts all or none, adding up to ``total``)."""
+        return self._c._call("POST", "/splits", json=_Base._split_create_body(
+            recipient, chain, token, total, participants, shares, note))
+
+    def get(self, id: str) -> Split:
+        return self._c._call("GET", f"/splits/{_seg(id)}")
+
+    def update(
+        self, id: str, edit_token: str, *, note: Any = _UNSET, labels: Any = _UNSET, status: Any = _UNSET,
+    ) -> Split:
+        """Change only the fields you pass (``note=None`` clears the note; ``status`` ``open`` / ``closed``).
+        Amounts can't change. ``edit_token`` is sent as ``x-edit-token``."""
+        return self._c._call("PATCH", f"/splits/{_seg(id)}", json=_Base._split_update_body(note, labels, status),
+                             headers={"x-edit-token": edit_token})
+
+
+class AsyncSplits:
+    """Bill splits, as ``AsyncLayerHop.splits``. Same methods as :class:`Splits`."""
+
+    def __init__(self, client: "AsyncLayerHop") -> None:
+        self._c = client
+
+    async def create(
+        self, recipient: str, chain: Union[str, int], token: str, total: str, *, participants: Optional[int] = None,
+        shares: Optional[List[SplitShareInput]] = None, note: Optional[str] = None,
+    ) -> SplitCreated:
+        return await self._c._call("POST", "/splits", json=_Base._split_create_body(
+            recipient, chain, token, total, participants, shares, note))
+
+    async def get(self, id: str) -> Split:
+        return await self._c._call("GET", f"/splits/{_seg(id)}")
+
+    async def update(
+        self, id: str, edit_token: str, *, note: Any = _UNSET, labels: Any = _UNSET, status: Any = _UNSET,
+    ) -> Split:
+        return await self._c._call("PATCH", f"/splits/{_seg(id)}", json=_Base._split_update_body(note, labels, status),
+                                   headers={"x-edit-token": edit_token})
+
+
+class TipJars:
+    """Tip jars, as ``LayerHop.tip_jars`` (public). Tips are quotes with ``purpose="tip"`` (and an optional ``note``)."""
+
+    def __init__(self, client: "LayerHop") -> None:
+        self._c = client
+
+    def get(self, address: str) -> TipJar:
+        """Counters and the latest messages of an address's tip jar."""
+        return self._c._call("GET", f"/tip-jars/{_seg(address)}")
+
+
+class AsyncTipJars:
+    """Tip jars, as ``AsyncLayerHop.tip_jars``. Same methods as :class:`TipJars`."""
+
+    def __init__(self, client: "AsyncLayerHop") -> None:
+        self._c = client
+
+    async def get(self, address: str) -> TipJar:
+        return await self._c._call("GET", f"/tip-jars/{_seg(address)}")
+
+
+class Payouts:
+    """Mass payouts, as ``LayerHop.payouts`` (public, no LayerHop fee on transfers). ``plan`` checks and
+    groups rows; ``transfers`` builds UNSIGNED batch transfers. The SDK never signs: check each call
+    against its row, then sign with the payer's wallet. Routed rows are paid with normal quotes
+    (``purpose="payout"``)."""
+
+    def __init__(self, client: "LayerHop") -> None:
+        self._c = client
+
+    def plan(
+        self, src_chain: Union[str, int], src_token: str, sender: str, *, rows: Optional[List[PayoutRowInput]] = None,
+        csv: Optional[str] = None,
+    ) -> PayoutPlan:
+        """Send ``rows`` (``{"recipient", "amount", "token", "chain", "label"?}``, amounts in HUMAN units
+        such as ``"25"``) or ``csv`` (``recipient,amount,token,chain[,label]`` lines)."""
+        return self._c._call("POST", "/payouts/plan", json=_Base._payout_plan_body(src_chain, src_token, sender, rows, csv))
+
+    def transfers(
+        self, chain: Union[str, int], token: str, sender: str, transfers: List[PayoutTransfer],
+    ) -> PayoutTransfers:
+        """Unsigned transfers of ``token`` (``{"recipient", "amount"}``, base units; at most 20 on EVM, 8 on
+        Solana): EVM ``calls`` or a Solana ``serializedTx``."""
+        return self._c._call("POST", "/payouts/transfers", json=_Base._payout_transfers_body(chain, token, sender, transfers))
+
+
+class AsyncPayouts:
+    """Mass payouts, as ``AsyncLayerHop.payouts``. Same methods as :class:`Payouts`."""
+
+    def __init__(self, client: "AsyncLayerHop") -> None:
+        self._c = client
+
+    async def plan(
+        self, src_chain: Union[str, int], src_token: str, sender: str, *, rows: Optional[List[PayoutRowInput]] = None,
+        csv: Optional[str] = None,
+    ) -> PayoutPlan:
+        return await self._c._call("POST", "/payouts/plan",
+                                   json=_Base._payout_plan_body(src_chain, src_token, sender, rows, csv))
+
+    async def transfers(
+        self, chain: Union[str, int], token: str, sender: str, transfers: List[PayoutTransfer],
+    ) -> PayoutTransfers:
+        return await self._c._call("POST", "/payouts/transfers",
+                                   json=_Base._payout_transfers_body(chain, token, sender, transfers))
+
+
 class DepositAddresses:
     """Deposit addresses, as ``LayerHop.deposit_addresses`` (API key): your user sends ``src_token``
     to ``address`` on ``src_chain`` without connecting a wallet, and the provider (Relay) delivers
@@ -1095,6 +1451,10 @@ class LayerHop(_Base):
         self.subscriptions = Subscriptions(self)
         self.deposit_addresses = DepositAddresses(self)
         self.limit_orders = LimitOrders(self)
+        self.recurring_orders = RecurringOrders(self)
+        self.splits = Splits(self)
+        self.tip_jars = TipJars(self)
+        self.payouts = Payouts(self)
         self.webhooks = Webhooks(self)
 
     def close(self) -> None:
@@ -1107,8 +1467,12 @@ class LayerHop(_Base):
     def __exit__(self, *exc: Any) -> None:
         self.close()
 
-    def _call(self, method: str, path: str, *, params: Optional[Dict[str, str]] = None, json: Any = None) -> Any:
-        res = self._client.request(method, self._url(path), params=params, json=json, headers=self._headers())
+    def _call(
+        self, method: str, path: str, *, params: Optional[Dict[str, str]] = None, json: Any = None,
+        headers: Optional[Dict[str, str]] = None,
+    ) -> Any:
+        res = self._client.request(method, self._url(path), params=params, json=json,
+                                   headers={**self._headers(), **(headers or {})})
         return self._handle(res)
 
     def _stream(self, path: str, event: str) -> Iterator[Any]:
@@ -1130,24 +1494,99 @@ class LayerHop(_Base):
     def chains(self) -> List[Chain]:
         return self._call("GET", "/chains")["chains"]
 
-    def tokens(self, chain: Union[str, int]) -> List[Token]:
-        return self._call("GET", "/tokens", params={"chain": str(chain)})["tokens"]
+    def tokens(
+        self, chain: Union[str, int], *, q: Optional[str] = None, limit: Optional[int] = None,
+        cursor: Optional[str] = None,
+    ) -> List[Token]:
+        """Tokens on a chain (one page). ``q`` searches by symbol, name or address. Use
+        :meth:`tokens_page` to get ``nextCursor`` too."""
+        return self.tokens_page(chain, q=q, limit=limit, cursor=cursor)["tokens"]
+
+    def tokens_page(
+        self, chain: Union[str, int], *, q: Optional[str] = None, limit: Optional[int] = None,
+        cursor: Optional[str] = None,
+    ) -> TokensPage:
+        """``GET /v1/tokens``: ``{"tokens", "nextCursor"}``; pass ``nextCursor`` as ``cursor`` to page."""
+        return self._call("GET", "/tokens", params=self._tokens_params(chain, q, limit, cursor))
+
+    def lookup_token(self, address: str, chain: Union[str, int, None] = None) -> Token:
+        """One token by address / mint. Tokens on no list are read on-chain (``verified: False``).
+        Without ``chain`` the API finds it (Solana for a mint, else the chain with the most liquidity)."""
+        return self._call("GET", "/tokens/lookup", params=self._lookup_params(address, chain))["token"]
+
+    def token_risk(self, chain: Union[str, int], address: str) -> TokenRisk:
+        """A token's safety report (``level``: ``ok``, ``caution``, ``danger`` or ``unknown``)."""
+        return self._call("GET", f"/tokens/{_seg(str(chain))}/{_seg(address)}/risk")["risk"]
+
+    def prices(self, ids: Sequence[PriceId]) -> Dict[str, float]:
+        """USD prices for up to 100 tokens, keyed by ``"chainId:address"``. Unknown ids are omitted."""
+        if not ids:
+            return {}
+        return self._call("GET", "/prices", params={"ids": ",".join(self._price_id(i) for i in ids)})["prices"]
+
+    def balances(
+        self, address: str, chains: Optional[Sequence[Union[str, int]]] = None, *,
+        tokens: Optional[Sequence[PriceId]] = None, fresh: bool = False,
+    ) -> BalancesResponse:
+        """Non-zero balances of a wallet, highest USD value first. ``tokens`` (at most 20) are always
+        returned, even at zero; ``fresh`` skips the server's 20 s cache. Failed chains are in ``errors``."""
+        return self._call("GET", "/balances", params=self._balances_params(address, chains, tokens, fresh))
 
     def quote(
         self, src_chain: Union[str, int], src_token: str, amount: str, dst_chain: Union[str, int], dst_token: str,
         *, sender: str, recipient: str, slippage_bps: int = 50, gas_on_arrival: Union[bool, float, None] = None,
+        gasless: bool = False, referrer: Optional[str] = None, copy_of: Optional[str] = None,
+        purpose: Optional[QuotePurpose] = None, split_id: Optional[str] = None, split_share: Optional[int] = None,
+        note: Optional[str] = None,
     ) -> QuoteResponse:
         """Ask every provider; ``best`` is the highest output for the user. ``amount`` is base units.
 
         ``gas_on_arrival`` also delivers native gas on the destination chain: ``True`` = $2, or a USD
         amount (0.5-20). Ignored for same-chain swaps, non-EVM destinations and native outputs;
-        providers that can't do it ignore it (check ``quote.get("gasOnArrival")``)."""
+        providers that can't do it ignore it (check ``quote.get("gasOnArrival")``).
+
+        ``gasless=True`` asks for a gasless swap (ERC-20 input, same EVM chain): continue with
+        :meth:`build_gasless`. ``referrer`` / ``copy_of`` are referral attribution only. ``purpose``
+        (``tip``, ``split``, ``payout``, ``gather``, ``rebalance``, ``fund``), ``split_id`` +
+        ``split_share`` and ``note`` (140 chars) are recorded on the order; none of them change the fee."""
         return self._call("GET", "/quote", params=self._quote_params(
-            src_chain, src_token, amount, dst_chain, dst_token, sender, recipient, slippage_bps, gas_on_arrival))
+            src_chain, src_token, amount, dst_chain, dst_token, sender, recipient, slippage_bps, gas_on_arrival,
+            gasless, referrer, copy_of, purpose, split_id, split_share, note))
+
+    def quote_calls(
+        self, src_chain: Union[str, int], src_token: str, dst_chain: Union[str, int], dst_token: str, dst_amount: str,
+        *, sender: str, recipient: str, slippage_bps: int = 50, calls: Optional[List[DestinationCall]] = None,
+        action: Optional[DestinationAction] = None, referrer: Optional[str] = None, copy_of: Optional[str] = None,
+    ) -> QuoteResponse:
+        """Destination calls (``POST /v1/quote``): an exact-output quote whose ``dst_amount`` of
+        ``dst_token`` is used by ``calls`` (``{"to", "data", "value"?}``) or an ``action`` preset
+        (``{"type": "aave-v3-supply"}``) on the destination chain, run by the provider's executor (the
+        calls' ``msg.sender``). Quotes carry ``srcAmount`` (what the sender pays) and ``calls``."""
+        return self._call("POST", "/quote", json=self._quote_calls_body(
+            src_chain, src_token, dst_chain, dst_token, dst_amount, sender, recipient, slippage_bps, calls, action,
+            referrer, copy_of))
 
     def build_tx(self, quote_id: str) -> BuiltTx:
-        """The unsigned transaction for a quote. EVM txs may carry an ``approval`` to send first."""
-        return self._call("POST", "/orders", json={"quoteId": quote_id})["tx"]
+        """The unsigned transaction for a quote. EVM txs may carry an ``approval`` to send first; Tron txs
+        (``vm == "tvm"``) carry ``unsigned`` (and maybe ``approval``) to sign with a Tron wallet. Raises
+        ``ValueError`` on a gasless quote (use :meth:`build_gasless`)."""
+        return self._build_tx_result(self._call("POST", "/orders", json={"quoteId": quote_id}))
+
+    def build_gasless(self, quote_id: str) -> GaslessSignRequest:
+        """Gasless quotes: the EIP-712 typed data to sign (an optional ``approval``, then ``trade``),
+        unchanged. Records the order. Raises ``ValueError`` when the quote is not gasless."""
+        return self._gasless_result(self._call("POST", "/orders", json={"quoteId": quote_id}))
+
+    def submit_gasless(
+        self, quote_id: str, trade_signature: str, approval_signature: Optional[str] = None,
+    ) -> GaslessOrderStatus:
+        """Gasless: send the wallet's 65-byte ``0x`` signatures; the provider's relayer sends the tx."""
+        return self._call("POST", "/orders/gasless",
+                          json=self._gasless_submit_body(quote_id, trade_signature, approval_signature))
+
+    def gasless_status(self, quote_id: str) -> GaslessOrderStatus:
+        """Gasless: the order's state; poll until final (``filled`` or ``failed``)."""
+        return self._call("GET", f"/orders/gasless/{_seg(quote_id)}")
 
     def submit(self, quote_id: str, signed_transaction: str) -> str:
         """For SvmTx with ``submitViaApi``: send the wallet-signed tx (base64). Returns the signature."""
@@ -1178,11 +1617,11 @@ class LayerHop(_Base):
 
     def stream_order(self, quote_id: str) -> Iterator[Order]:
         """Live order status (Server-Sent Events): yields the order now and on every change, and ends
-        when it is final (filled, refunded, failed or expired). Break out of the loop to stop early."""
+        when it is final (filled, refunded, failed, expired or dropped). Break out of the loop to stop early."""
         return self._stream(f"/orders/{_seg(quote_id)}/events", "order")
 
     def watch(self, provider: str, id: str, *, interval: float = 3.0, timeout: float = 1800.0) -> Iterator[OrderStatus]:
-        """Poll until the order is final (filled/refunded/failed), yielding each state change."""
+        """Poll until the order is final (filled/refunded/failed/dropped), yielding each state change."""
         end = time.monotonic() + timeout
         last = None
         while time.monotonic() < end:
@@ -1220,6 +1659,10 @@ class AsyncLayerHop(_Base):
         self.subscriptions = AsyncSubscriptions(self)
         self.deposit_addresses = AsyncDepositAddresses(self)
         self.limit_orders = AsyncLimitOrders(self)
+        self.recurring_orders = AsyncRecurringOrders(self)
+        self.splits = AsyncSplits(self)
+        self.tip_jars = AsyncTipJars(self)
+        self.payouts = AsyncPayouts(self)
         self.webhooks = AsyncWebhooks(self)
 
     async def aclose(self) -> None:
@@ -1232,8 +1675,12 @@ class AsyncLayerHop(_Base):
     async def __aexit__(self, *exc: Any) -> None:
         await self.aclose()
 
-    async def _call(self, method: str, path: str, *, params: Optional[Dict[str, str]] = None, json: Any = None) -> Any:
-        res = await self._client.request(method, self._url(path), params=params, json=json, headers=self._headers())
+    async def _call(
+        self, method: str, path: str, *, params: Optional[Dict[str, str]] = None, json: Any = None,
+        headers: Optional[Dict[str, str]] = None,
+    ) -> Any:
+        res = await self._client.request(method, self._url(path), params=params, json=json,
+                                         headers={**self._headers(), **(headers or {})})
         return self._handle(res)
 
     async def _stream(self, path: str, event: str) -> AsyncIterator[Any]:
@@ -1254,18 +1701,69 @@ class AsyncLayerHop(_Base):
     async def chains(self) -> List[Chain]:
         return (await self._call("GET", "/chains"))["chains"]
 
-    async def tokens(self, chain: Union[str, int]) -> List[Token]:
-        return (await self._call("GET", "/tokens", params={"chain": str(chain)}))["tokens"]
+    async def tokens(
+        self, chain: Union[str, int], *, q: Optional[str] = None, limit: Optional[int] = None,
+        cursor: Optional[str] = None,
+    ) -> List[Token]:
+        return (await self.tokens_page(chain, q=q, limit=limit, cursor=cursor))["tokens"]
+
+    async def tokens_page(
+        self, chain: Union[str, int], *, q: Optional[str] = None, limit: Optional[int] = None,
+        cursor: Optional[str] = None,
+    ) -> TokensPage:
+        return await self._call("GET", "/tokens", params=self._tokens_params(chain, q, limit, cursor))
+
+    async def lookup_token(self, address: str, chain: Union[str, int, None] = None) -> Token:
+        return (await self._call("GET", "/tokens/lookup", params=self._lookup_params(address, chain)))["token"]
+
+    async def token_risk(self, chain: Union[str, int], address: str) -> TokenRisk:
+        return (await self._call("GET", f"/tokens/{_seg(str(chain))}/{_seg(address)}/risk"))["risk"]
+
+    async def prices(self, ids: Sequence[PriceId]) -> Dict[str, float]:
+        if not ids:
+            return {}
+        return (await self._call("GET", "/prices", params={"ids": ",".join(self._price_id(i) for i in ids)}))["prices"]
+
+    async def balances(
+        self, address: str, chains: Optional[Sequence[Union[str, int]]] = None, *,
+        tokens: Optional[Sequence[PriceId]] = None, fresh: bool = False,
+    ) -> BalancesResponse:
+        return await self._call("GET", "/balances", params=self._balances_params(address, chains, tokens, fresh))
 
     async def quote(
         self, src_chain: Union[str, int], src_token: str, amount: str, dst_chain: Union[str, int], dst_token: str,
         *, sender: str, recipient: str, slippage_bps: int = 50, gas_on_arrival: Union[bool, float, None] = None,
+        gasless: bool = False, referrer: Optional[str] = None, copy_of: Optional[str] = None,
+        purpose: Optional[QuotePurpose] = None, split_id: Optional[str] = None, split_share: Optional[int] = None,
+        note: Optional[str] = None,
     ) -> QuoteResponse:
         return await self._call("GET", "/quote", params=self._quote_params(
-            src_chain, src_token, amount, dst_chain, dst_token, sender, recipient, slippage_bps, gas_on_arrival))
+            src_chain, src_token, amount, dst_chain, dst_token, sender, recipient, slippage_bps, gas_on_arrival,
+            gasless, referrer, copy_of, purpose, split_id, split_share, note))
+
+    async def quote_calls(
+        self, src_chain: Union[str, int], src_token: str, dst_chain: Union[str, int], dst_token: str, dst_amount: str,
+        *, sender: str, recipient: str, slippage_bps: int = 50, calls: Optional[List[DestinationCall]] = None,
+        action: Optional[DestinationAction] = None, referrer: Optional[str] = None, copy_of: Optional[str] = None,
+    ) -> QuoteResponse:
+        return await self._call("POST", "/quote", json=self._quote_calls_body(
+            src_chain, src_token, dst_chain, dst_token, dst_amount, sender, recipient, slippage_bps, calls, action,
+            referrer, copy_of))
 
     async def build_tx(self, quote_id: str) -> BuiltTx:
-        return (await self._call("POST", "/orders", json={"quoteId": quote_id}))["tx"]
+        return self._build_tx_result(await self._call("POST", "/orders", json={"quoteId": quote_id}))
+
+    async def build_gasless(self, quote_id: str) -> GaslessSignRequest:
+        return self._gasless_result(await self._call("POST", "/orders", json={"quoteId": quote_id}))
+
+    async def submit_gasless(
+        self, quote_id: str, trade_signature: str, approval_signature: Optional[str] = None,
+    ) -> GaslessOrderStatus:
+        return await self._call("POST", "/orders/gasless",
+                                json=self._gasless_submit_body(quote_id, trade_signature, approval_signature))
+
+    async def gasless_status(self, quote_id: str) -> GaslessOrderStatus:
+        return await self._call("GET", f"/orders/gasless/{_seg(quote_id)}")
 
     async def submit(self, quote_id: str, signed_transaction: str) -> str:
         return (await self._call("POST", "/orders/submit", json={"quoteId": quote_id, "signedTransaction": signed_transaction}))["txHash"]
