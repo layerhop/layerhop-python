@@ -59,6 +59,7 @@ from .types import (
     PublicInvoice,
     QuotePurpose,
     QuoteResponse,
+    QuoteStreamUpdate,
     RecurringOrderBuild,
     RecurringOrderCancelResponse,
     RecurringOrderList,
@@ -66,6 +67,7 @@ from .types import (
     Refund,
     RefundCreateResponse,
     ReportSubmittedResponse,
+    ScreenResponse,
     SimulateDepositResponse,
     SimulateResponse,
     Split,
@@ -81,13 +83,24 @@ from .types import (
     TokenRisk,
     TokensPage,
     TriggerWebhookResponse,
+    UsageBucket,
+    UsageError,
+    UsageReport,
     WebhookEvent,
     WebhookEventType,
+    WebhookResendResult,
+    X402PaymentStatus,
+    X402Payment,
+    X402PaymentsPage,
+    X402Requirements,
+    X402SettleResponse,
+    X402Supported,
+    X402VerifyResponse,
 )
 
 DEFAULT_BASE_URL = "https://api.layerhop.com"
 DEFAULT_TIMEOUT = 30.0
-__version__ = "0.8.0"
+__version__ = "0.9.0"
 
 
 PriceId = Union[str, Tuple[Union[str, int], str], Dict[str, Any]]
@@ -111,21 +124,21 @@ _UNSET: Any = _Unset()
 class _SseParser:
     """Incremental Server-Sent Events parser, fed one line (without its terminator) at a time.
 
-    ``feed`` returns the joined ``data`` of a completed frame whose name is ``event``, else ``None``.
-    Comment lines (``:``) are skipped; frames of other names (``ready``) are ignored.
+    ``feed`` returns ``(name, data)`` of a completed frame whose name is in ``events`` (``data`` lines
+    joined), else ``None``. Comment lines (``:``) are skipped; frames of other names (``ready``) are ignored.
     """
 
-    def __init__(self, event: str) -> None:
-        self.event = event
+    def __init__(self, events: Sequence[str]) -> None:
+        self.events = tuple(events)
         self._name = "message"
         self._data: List[str] = []
 
-    def feed(self, line: str) -> Optional[str]:
+    def feed(self, line: str) -> Optional[Tuple[str, str]]:
         line = line.rstrip("\r")
         if line == "":
             name, data = self._name, self._data
             self._name, self._data = "message", []
-            return "\n".join(data) if name == self.event and data else None
+            return (name, "\n".join(data)) if name in self.events and data else None
         if line.startswith("event:"):
             self._name = line[6:].strip()
         elif line.startswith("data:"):
@@ -170,12 +183,50 @@ class _Base:
     def _url(self, path: str) -> str:
         return f"{self.base_url}/v1{path}"
 
+    @staticmethod
+    def _stream_error(data: Any) -> LayerHopApiError:
+        """The ``error`` event of a quote stream (the JSON error body plus ``status``) as an exception."""
+        d = data if isinstance(data, dict) else {}
+        err = d.get("error") if isinstance(d.get("error"), dict) else {}
+        status = d.get("status")
+        return LayerHopApiError(
+            code=str(err.get("code") or "INTERNAL"),
+            message=str(err.get("message") or "Quote stream failed"),
+            status=status if isinstance(status, int) and not isinstance(status, bool) else 500,
+            request_id=err.get("requestId"),
+            docs_url=err.get("docsUrl"),
+            details=err.get("details") if isinstance(err.get("details"), dict) else None,
+        )
+
+    def _quote_stream_params(
+        self, src_chain: Union[str, int], src_token: str, amount: Optional[str], dst_chain: Union[str, int],
+        dst_token: str, sender: str, recipient: str, slippage_bps: int, dst_amount: Optional[str],
+        interval_ms: Optional[int], extra: Dict[str, Any],
+    ) -> Dict[str, str]:
+        if (amount is None) == (dst_amount is None):
+            raise TypeError("pass exactly one of amount (exact input) or dst_amount (exact output)")
+        if dst_amount is not None:
+            if not isinstance(dst_amount, str):
+                raise TypeError("dst_amount must be an integer string in base units (e.g. '100000000')")
+            if extra.get("gas_on_arrival") is not None or extra.get("gasless"):
+                raise TypeError("gas_on_arrival and gasless are not available with dst_amount")
+        q = self._quote_params(src_chain, src_token, amount if amount is not None else "0", dst_chain, dst_token,
+                               sender, recipient, slippage_bps, **extra)
+        if dst_amount is not None:
+            del q["amount"]
+            q["dstAmount"] = dst_amount
+        if interval_ms is not None:
+            q["intervalMs"] = str(interval_ms)
+        return q
+
     def _quote_params(
         self, src_chain: Union[str, int], src_token: str, amount: str, dst_chain: Union[str, int],
         dst_token: str, sender: str, recipient: str, slippage_bps: int,
         gas_on_arrival: Union[bool, float, None] = None, gasless: bool = False, referrer: Optional[str] = None,
         copy_of: Optional[str] = None, purpose: Optional[str] = None, split_id: Optional[str] = None,
         split_share: Optional[int] = None, note: Optional[str] = None,
+        exclude_providers: Optional[List[str]] = None, exclude_bridges: Optional[List[str]] = None,
+        exclude_exchanges: Optional[List[str]] = None,
     ) -> Dict[str, str]:
         if not isinstance(amount, str):
             raise TypeError("amount must be an integer string in base units (e.g. '100000000')")
@@ -199,6 +250,10 @@ class _Base:
                      ("splitShare", None if split_share is None else str(split_share)), ("note", note)):
             if v:
                 q[k] = v
+        for k, ids in (("excludeProviders", exclude_providers), ("excludeBridges", exclude_bridges),
+                       ("excludeExchanges", exclude_exchanges)):
+            if ids:
+                q[k] = ",".join(ids)
         return q
 
     def _quote_calls_body(
@@ -364,7 +419,7 @@ class _Base:
         amount: str, settle_chain: Union[str, int], settle_token: str, recipient: str,
         merchant_name: Optional[str], description: Optional[str], reference: Optional[str],
         metadata: Optional[Dict[str, str]], success_url: Optional[str], cancel_url: Optional[str],
-        expires_in_minutes: Optional[int],
+        expires_in_minutes: Optional[int], embed_origins: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         if not isinstance(amount, str):
             raise TypeError("amount must be an integer string in base units (e.g. '49000000')")
@@ -373,7 +428,7 @@ class _Base:
         }
         for k, v in (("merchantName", merchant_name), ("description", description), ("reference", reference),
                      ("metadata", metadata), ("successUrl", success_url), ("cancelUrl", cancel_url),
-                     ("expiresInMinutes", expires_in_minutes)):
+                     ("expiresInMinutes", expires_in_minutes), ("embedOrigins", embed_origins)):
             if v is not None:
                 b[k] = v
         return b
@@ -1320,11 +1375,13 @@ class Checkout:
         merchant_name: Optional[str] = None, description: Optional[str] = None, reference: Optional[str] = None,
         metadata: Optional[Dict[str, str]] = None, success_url: Optional[str] = None,
         cancel_url: Optional[str] = None, expires_in_minutes: Optional[int] = None,
+        embed_origins: Optional[List[str]] = None,
     ) -> CheckoutSession:
-        """Create a session for ``amount`` (base units of the settlement token). Send the payer to ``url``."""
+        """Create a session for ``amount`` (base units of the settlement token). Send the payer to ``url``.
+        ``embed_origins``: the only sites (exact origins) that may show the session in an iframe (empty = any)."""
         return self._c._call("POST", "/checkout/sessions", json=_Base._checkout_create_body(
             amount, settle_chain, settle_token, recipient, merchant_name, description, reference, metadata,
-            success_url, cancel_url, expires_in_minutes))
+            success_url, cancel_url, expires_in_minutes, embed_origins))
 
     def get(self, id: str) -> CheckoutSession:
         """Public. Without the owner's API key, ``reference`` and ``metadata`` are omitted."""
@@ -1339,6 +1396,17 @@ class Checkout:
     def expire(self, id: str) -> CheckoutSession:
         """Cancel an ``open`` session so it can no longer be paid."""
         return self._c._call("POST", f"/checkout/sessions/{_seg(id)}/expire", json={})
+
+    def start_transfer(self, id: str) -> CheckoutSession:
+        """Public. Show a "Send to address" QR for this session (idempotent): the session with its
+        ``transfer`` (needs ``transferAvailable``)."""
+        return self._c._call("POST", f"/checkout/sessions/{_seg(id)}/transfer", json={})
+
+    def start_bitcoin(self, id: str, *, refund_address: Optional[str] = None) -> CheckoutSession:
+        """Public. Show (or refresh, once expired) a Bitcoin deposit address for this session (D-067):
+        the session with its ``bitcoin`` (needs ``bitcoinAvailable``)."""
+        return self._c._call("POST", f"/checkout/sessions/{_seg(id)}/bitcoin",
+                             json={"refundAddress": refund_address} if refund_address else {})
 
     def quote(
         self, id: str, src_chain: Union[str, int], src_token: str, *, sender: str, slippage_bps: Optional[int] = None,
@@ -1366,10 +1434,11 @@ class AsyncCheckout:
         merchant_name: Optional[str] = None, description: Optional[str] = None, reference: Optional[str] = None,
         metadata: Optional[Dict[str, str]] = None, success_url: Optional[str] = None,
         cancel_url: Optional[str] = None, expires_in_minutes: Optional[int] = None,
+        embed_origins: Optional[List[str]] = None,
     ) -> CheckoutSession:
         return await self._c._call("POST", "/checkout/sessions", json=_Base._checkout_create_body(
             amount, settle_chain, settle_token, recipient, merchant_name, description, reference, metadata,
-            success_url, cancel_url, expires_in_minutes))
+            success_url, cancel_url, expires_in_minutes, embed_origins))
 
     async def get(self, id: str) -> CheckoutSession:
         return await self._c._call("GET", f"/checkout/sessions/{_seg(id)}")
@@ -1382,6 +1451,13 @@ class AsyncCheckout:
     async def expire(self, id: str) -> CheckoutSession:
         return await self._c._call("POST", f"/checkout/sessions/{_seg(id)}/expire", json={})
 
+    async def start_transfer(self, id: str) -> CheckoutSession:
+        return await self._c._call("POST", f"/checkout/sessions/{_seg(id)}/transfer", json={})
+
+    async def start_bitcoin(self, id: str, *, refund_address: Optional[str] = None) -> CheckoutSession:
+        return await self._c._call("POST", f"/checkout/sessions/{_seg(id)}/bitcoin",
+                                   json={"refundAddress": refund_address} if refund_address else {})
+
     async def quote(
         self, id: str, src_chain: Union[str, int], src_token: str, *, sender: str, slippage_bps: Optional[int] = None,
     ) -> CheckoutQuoteResponse:
@@ -1393,20 +1469,75 @@ class AsyncCheckout:
         return self._c._stream(f"/checkout/sessions/{_seg(id)}/events", "session")
 
 
+def _webhook_stream_path(since: Optional[str]) -> str:
+    return "/webhooks/stream" + (f"?since={_urlquote(since, safe='')}" if since else "")
+
+
+def _resend_body(endpoint_id: Optional[str]) -> Dict[str, Any]:
+    return {"endpointId": endpoint_id} if endpoint_id else {}
+
+
+def _usage_params(bucket: Optional[str], from_: Optional[str], to: Optional[str], key_id: Optional[str]) -> Dict[str, str]:
+    return {k: str(v) for k, v in (("bucket", bucket), ("from", from_), ("to", to), ("keyId", key_id)) if v}
+
+
+def _usage_errors_params(code: Optional[str], key_id: Optional[str], limit: Optional[int]) -> Dict[str, str]:
+    p = {k: v for k, v in (("code", code), ("keyId", key_id)) if v}
+    if limit is not None:
+        p["limit"] = str(limit)
+    return p
+
+
+def _x402_requirements_body(
+    amount: str, pay_to: str, resource: str, network: Optional[str], description: Optional[str],
+    mime_type: Optional[str], max_timeout_seconds: Optional[int],
+) -> Dict[str, Any]:
+    if not isinstance(amount, str):
+        raise TypeError("amount must be an integer string in USDC base units (e.g. '10000' = 0.01 USDC)")
+    b: Dict[str, Any] = {"amount": amount, "payTo": pay_to, "resource": resource}
+    for k, v in (("network", network), ("description", description), ("mimeType", mime_type),
+                 ("maxTimeoutSeconds", max_timeout_seconds)):
+        if v is not None:
+            b[k] = v
+    return b
+
+
+def _x402_facilitator_body(
+    payment_payload: Dict[str, Any], payment_requirements: Dict[str, Any], x402_version: Optional[int],
+) -> Dict[str, Any]:
+    b: Dict[str, Any] = {"paymentPayload": payment_payload, "paymentRequirements": payment_requirements}
+    if x402_version is not None:
+        b["x402Version"] = x402_version
+    return b
+
+
+def _x402_list_params(status: Optional[str], cursor: Optional[str], limit: Optional[int]) -> Dict[str, str]:
+    p = {k: v for k, v in (("status", status), ("cursor", cursor)) if v}
+    if limit is not None:
+        p["limit"] = str(limit)
+    return p
+
+
 class Webhooks:
-    """Webhook developer tools with an API key, as ``LayerHop.webhooks`` (the CLI's ``listen`` and ``trigger``)."""
+    """Webhook developer tools with an API key, as ``LayerHop.webhooks`` (the CLI's ``listen``,
+    ``trigger`` and ``events resend``)."""
 
     def __init__(self, client: "LayerHop") -> None:
         self._c = client
 
-    def stream(self) -> Iterator[WebhookEvent]:
-        """Your account's webhook events (the key's mode) as they are created, with the exact payloads.
+    def stream(self, *, since: Optional[str] = None) -> Iterator[WebhookEvent]:
+        """Your account's webhook events (the key's mode) as they are created, with the exact payloads,
+        plus events resent later. ``since`` (ISO time, at most an hour back) first replays missed events.
         Runs until the server closes the stream (at most 30 minutes) or you break out of the loop."""
-        return self._c._stream("/webhooks/stream", "event")
+        return self._c._stream(_webhook_stream_path(since), "event")
 
     def trigger(self, type: WebhookEventType) -> TriggerWebhookResponse:
         """A sample event in test mode (test keys only): sent to your test endpoints and open streams."""
         return self._c._call("POST", "/webhooks/trigger", json={"type": type})
+
+    def resend(self, event_id: str, *, endpoint_id: Optional[str] = None) -> WebhookResendResult:
+        """Send an event of the key's mode again: to subscribed endpoints (or ``endpoint_id``) and open streams."""
+        return self._c._call("POST", f"/webhooks/events/{_seg(event_id)}/resend", json=_resend_body(endpoint_id))
 
 
 class AsyncWebhooks:
@@ -1415,11 +1546,220 @@ class AsyncWebhooks:
     def __init__(self, client: "AsyncLayerHop") -> None:
         self._c = client
 
-    def stream(self) -> AsyncIterator[WebhookEvent]:
-        return self._c._stream("/webhooks/stream", "event")
+    def stream(self, *, since: Optional[str] = None) -> AsyncIterator[WebhookEvent]:
+        return self._c._stream(_webhook_stream_path(since), "event")
 
     async def trigger(self, type: WebhookEventType) -> TriggerWebhookResponse:
         return await self._c._call("POST", "/webhooks/trigger", json={"type": type})
+
+    async def resend(self, event_id: str, *, endpoint_id: Optional[str] = None) -> WebhookResendResult:
+        return await self._c._call("POST", f"/webhooks/events/{_seg(event_id)}/resend", json=_resend_body(endpoint_id))
+
+
+class Usage:
+    """Usage and errors of the key's own account and mode, as ``LayerHop.usage`` (the dashboard's Usage page)."""
+
+    def __init__(self, client: "LayerHop") -> None:
+        self._c = client
+
+    def get(
+        self, *, bucket: Optional[UsageBucket] = None, from_: Optional[str] = None, to: Optional[str] = None,
+        key_id: Optional[str] = None,
+    ) -> UsageReport:
+        """Requests per hour or day with status classes, p50 / p95 latency, endpoint groups and error
+        codes. ``from_`` / ``to`` are ISO 8601 or unix seconds."""
+        return self._c._call("GET", "/usage", params=_usage_params(bucket, from_, to, key_id))
+
+    def errors(
+        self, *, code: Optional[str] = None, key_id: Optional[str] = None, limit: Optional[int] = None,
+    ) -> List[UsageError]:
+        """The newest failed requests with a stable error code (code, endpoint, time, ``requestId``)."""
+        return self._c._call("GET", "/usage/errors", params=_usage_errors_params(code, key_id, limit))["errors"]
+
+
+class AsyncUsage:
+    """Usage and errors, as ``AsyncLayerHop.usage``. Same methods as :class:`Usage`."""
+
+    def __init__(self, client: "AsyncLayerHop") -> None:
+        self._c = client
+
+    async def get(
+        self, *, bucket: Optional[UsageBucket] = None, from_: Optional[str] = None, to: Optional[str] = None,
+        key_id: Optional[str] = None,
+    ) -> UsageReport:
+        return await self._c._call("GET", "/usage", params=_usage_params(bucket, from_, to, key_id))
+
+    async def errors(
+        self, *, code: Optional[str] = None, key_id: Optional[str] = None, limit: Optional[int] = None,
+    ) -> List[UsageError]:
+        return (await self._c._call("GET", "/usage/errors", params=_usage_errors_params(code, key_id, limit)))["errors"]
+
+
+class X402Payments:
+    """x402 payments settled through LayerHop, as ``LayerHop.x402.payments`` (API key)."""
+
+    def __init__(self, client: "LayerHop") -> None:
+        self._c = client
+
+    def list(
+        self, *, status: Optional[X402PaymentStatus] = None, cursor: Optional[str] = None, limit: Optional[int] = None,
+    ) -> X402PaymentsPage:
+        """Your account's payments, newest first. Pass ``nextCursor`` as ``cursor`` to page."""
+        return self._c._call("GET", "/x402/payments", params=_x402_list_params(status, cursor, limit))
+
+    def get(self, id: str) -> X402Payment:
+        return self._c._call("GET", f"/x402/payments/{_seg(id)}")
+
+
+class AsyncX402Payments:
+    """x402 payments, as ``AsyncLayerHop.x402.payments``. Same methods as :class:`X402Payments`."""
+
+    def __init__(self, client: "AsyncLayerHop") -> None:
+        self._c = client
+
+    async def list(
+        self, *, status: Optional[X402PaymentStatus] = None, cursor: Optional[str] = None, limit: Optional[int] = None,
+    ) -> X402PaymentsPage:
+        return await self._c._call("GET", "/x402/payments", params=_x402_list_params(status, cursor, limit))
+
+    async def get(self, id: str) -> X402Payment:
+        return await self._c._call("GET", f"/x402/payments/{_seg(id)}")
+
+
+class X402:
+    """x402 pay-per-request (D-066), as ``LayerHop.x402``: LayerHop is the facilitator that verifies
+    and settles USDC payments (EIP-3009) to your own fee-splitting deposit address.
+
+    A request without a payment: answer ``402`` with :meth:`requirements` (cache them; the deposit
+    address never changes). A request with ``X-PAYMENT`` (v1) or ``PAYMENT-SIGNATURE`` (v2): decode
+    it (base64 JSON) and :meth:`verify` it, run your handler, then :meth:`settle` it.
+    """
+
+    def __init__(self, client: "LayerHop") -> None:
+        self._c = client
+        self.payments = X402Payments(client)
+
+    def supported(self) -> X402Supported:
+        """Public. The schemes and networks the facilitator verifies and settles."""
+        return self._c._call("GET", "/x402/supported")
+
+    def requirements(
+        self, amount: str, pay_to: str, resource: str, *, network: Optional[str] = None,
+        description: Optional[str] = None, mime_type: Optional[str] = None, max_timeout_seconds: Optional[int] = None,
+    ) -> X402Requirements:
+        """Payment requirements for ``resource`` at ``amount`` (what you net per request, USDC base
+        units: ``"10000"`` = 0.01 USDC), paid out to ``pay_to``. ``network``: ``base`` (default),
+        ``optimism``, ``arbitrum``, ``polygon`` or a CAIP-2 id. The payer pays the fee on top."""
+        return self._c._call("POST", "/x402/requirements", json=_x402_requirements_body(
+            amount, pay_to, resource, network, description, mime_type, max_timeout_seconds))
+
+    def verify(
+        self, payment_payload: Dict[str, Any], payment_requirements: Dict[str, Any], *, x402_version: Optional[int] = None,
+    ) -> X402VerifyResponse:
+        """Read-only check of a payment to your requirements; ``isValid: False`` carries ``invalidReason``."""
+        return self._c._call("POST", "/x402/verify",
+                             json=_x402_facilitator_body(payment_payload, payment_requirements, x402_version))
+
+    def settle(
+        self, payment_payload: Dict[str, Any], payment_requirements: Dict[str, Any], *, x402_version: Optional[int] = None,
+    ) -> X402SettleResponse:
+        """Settle a verified payment (live key; idempotent per authorization). ``errorReason ==
+        "settlement_pending"``: sent, receipt not in yet (the ``x402.payment.settled`` webhook fires later)."""
+        return self._c._call("POST", "/x402/settle",
+                             json=_x402_facilitator_body(payment_payload, payment_requirements, x402_version))
+
+
+class AsyncX402:
+    """x402 pay-per-request, as ``AsyncLayerHop.x402``. Same methods as :class:`X402`."""
+
+    def __init__(self, client: "AsyncLayerHop") -> None:
+        self._c = client
+        self.payments = AsyncX402Payments(client)
+
+    async def supported(self) -> X402Supported:
+        return await self._c._call("GET", "/x402/supported")
+
+    async def requirements(
+        self, amount: str, pay_to: str, resource: str, *, network: Optional[str] = None,
+        description: Optional[str] = None, mime_type: Optional[str] = None, max_timeout_seconds: Optional[int] = None,
+    ) -> X402Requirements:
+        return await self._c._call("POST", "/x402/requirements", json=_x402_requirements_body(
+            amount, pay_to, resource, network, description, mime_type, max_timeout_seconds))
+
+    async def verify(
+        self, payment_payload: Dict[str, Any], payment_requirements: Dict[str, Any], *, x402_version: Optional[int] = None,
+    ) -> X402VerifyResponse:
+        return await self._c._call("POST", "/x402/verify",
+                                   json=_x402_facilitator_body(payment_payload, payment_requirements, x402_version))
+
+    async def settle(
+        self, payment_payload: Dict[str, Any], payment_requirements: Dict[str, Any], *, x402_version: Optional[int] = None,
+    ) -> X402SettleResponse:
+        return await self._c._call("POST", "/x402/settle",
+                                   json=_x402_facilitator_body(payment_payload, payment_requirements, x402_version))
+
+
+_QUOTE_STREAM_DOC = """Live quotes (``GET /v1/quote/stream``, D-068): yields a fresh ranked quote set
+        (a :class:`QuoteStreamUpdate`, the same shape as :meth:`LayerHop.quote` plus ``seq``) whenever the
+        best route or any amount changes, and before the shown quote expires. Ends after the stream's
+        lifetime (5 minutes); raises :class:`LayerHopApiError` when a refresh fails (``NO_ROUTE``,
+        ``RATE_LIMITED``, ``ADDRESS_SANCTIONED``, ...). Break out of the loop to stop.
+
+        Same parameters as :meth:`LayerHop.quote`; pass ``amount=None, dst_amount=...`` for an
+        exact-output stream. ``interval_ms``: refresh interval (default 10000, at least 5000); each
+        refresh counts as one request against your rate limit. At most 3 open streams per key."""
+
+
+class Quotes:
+    """Live quotes, as ``LayerHop.quotes``."""
+
+    def __init__(self, client: "LayerHop") -> None:
+        self._c = client
+
+    def stream(
+        self, src_chain: Union[str, int], src_token: str, amount: Optional[str], dst_chain: Union[str, int],
+        dst_token: str, *, sender: str, recipient: str, slippage_bps: int = 50, dst_amount: Optional[str] = None,
+        interval_ms: Optional[int] = None, gas_on_arrival: Union[bool, float, None] = None, gasless: bool = False,
+        referrer: Optional[str] = None, copy_of: Optional[str] = None, purpose: Optional[QuotePurpose] = None,
+        split_id: Optional[str] = None, split_share: Optional[int] = None, note: Optional[str] = None,
+        exclude_providers: Optional[List[str]] = None, exclude_bridges: Optional[List[str]] = None,
+        exclude_exchanges: Optional[List[str]] = None,
+    ) -> Iterator[QuoteStreamUpdate]:
+        q = self._c._quote_stream_params(
+            src_chain, src_token, amount, dst_chain, dst_token, sender, recipient, slippage_bps, dst_amount,
+            interval_ms, dict(gas_on_arrival=gas_on_arrival, gasless=gasless, referrer=referrer, copy_of=copy_of,
+                              purpose=purpose, split_id=split_id, split_share=split_share, note=note,
+                              exclude_providers=exclude_providers, exclude_bridges=exclude_bridges,
+                              exclude_exchanges=exclude_exchanges))
+        return self._c._quote_stream(q)
+
+    stream.__doc__ = _QUOTE_STREAM_DOC
+
+
+class AsyncQuotes:
+    """Live quotes, as ``AsyncLayerHop.quotes``: ``async for update in lh.quotes.stream(...)``."""
+
+    def __init__(self, client: "AsyncLayerHop") -> None:
+        self._c = client
+
+    def stream(
+        self, src_chain: Union[str, int], src_token: str, amount: Optional[str], dst_chain: Union[str, int],
+        dst_token: str, *, sender: str, recipient: str, slippage_bps: int = 50, dst_amount: Optional[str] = None,
+        interval_ms: Optional[int] = None, gas_on_arrival: Union[bool, float, None] = None, gasless: bool = False,
+        referrer: Optional[str] = None, copy_of: Optional[str] = None, purpose: Optional[QuotePurpose] = None,
+        split_id: Optional[str] = None, split_share: Optional[int] = None, note: Optional[str] = None,
+        exclude_providers: Optional[List[str]] = None, exclude_bridges: Optional[List[str]] = None,
+        exclude_exchanges: Optional[List[str]] = None,
+    ) -> AsyncIterator[QuoteStreamUpdate]:
+        q = self._c._quote_stream_params(
+            src_chain, src_token, amount, dst_chain, dst_token, sender, recipient, slippage_bps, dst_amount,
+            interval_ms, dict(gas_on_arrival=gas_on_arrival, gasless=gasless, referrer=referrer, copy_of=copy_of,
+                              purpose=purpose, split_id=split_id, split_share=split_share, note=note,
+                              exclude_providers=exclude_providers, exclude_bridges=exclude_bridges,
+                              exclude_exchanges=exclude_exchanges))
+        return self._c._quote_stream(q)
+
+    stream.__doc__ = _QUOTE_STREAM_DOC
 
 
 class LayerHop(_Base):
@@ -1456,6 +1796,9 @@ class LayerHop(_Base):
         self.tip_jars = TipJars(self)
         self.payouts = Payouts(self)
         self.webhooks = Webhooks(self)
+        self.usage = Usage(self)
+        self.x402 = X402(self)
+        self.quotes = Quotes(self)
 
     def close(self) -> None:
         if self._owns_client:
@@ -1477,16 +1820,38 @@ class LayerHop(_Base):
 
     def _stream(self, path: str, event: str) -> Iterator[Any]:
         """Read a Server-Sent Events stream, yielding the JSON data of ``event`` frames."""
-        with self._client.stream("GET", self._url(path), headers=self._stream_headers(),
+        events = self._stream_events(path, (event,))
+        try:
+            for _name, data in events:
+                yield data
+        finally:
+            events.close()  # type: ignore[attr-defined]  # closes the response when the caller stops early
+
+    def _stream_events(self, path: str, events: Sequence[str], params: Optional[Dict[str, str]] = None) -> Iterator[Tuple[str, Any]]:
+        """Read a Server-Sent Events stream, yielding ``(name, json)`` of frames named in ``events``."""
+        with self._client.stream("GET", self._url(path), params=params, headers=self._stream_headers(),
                                  timeout=self._stream_timeout_config()) as res:
             if not res.is_success:
                 res.read()
                 self._handle(res)
-            parser = _SseParser(event)
+            parser = _SseParser(events)
             for line in res.iter_lines():
-                data = parser.feed(line)
-                if data is not None:
-                    yield _json.loads(data)
+                frame = parser.feed(line)
+                if frame is not None:
+                    yield frame[0], _json.loads(frame[1])
+
+    def _quote_stream(self, params: Dict[str, str]) -> Iterator[QuoteStreamUpdate]:
+        events = self._stream_events("/quote/stream", ("quote", "error", "end"), params)
+        try:
+            for name, data in events:
+                if name == "quote":
+                    yield data
+                elif name == "error":
+                    raise self._stream_error(data)
+                else:
+                    return
+        finally:
+            events.close()  # type: ignore[attr-defined]
 
     def health(self) -> Dict[str, Any]:
         return self._call("GET", "/health")
@@ -1537,7 +1902,8 @@ class LayerHop(_Base):
         *, sender: str, recipient: str, slippage_bps: int = 50, gas_on_arrival: Union[bool, float, None] = None,
         gasless: bool = False, referrer: Optional[str] = None, copy_of: Optional[str] = None,
         purpose: Optional[QuotePurpose] = None, split_id: Optional[str] = None, split_share: Optional[int] = None,
-        note: Optional[str] = None,
+        note: Optional[str] = None, exclude_providers: Optional[List[str]] = None,
+        exclude_bridges: Optional[List[str]] = None, exclude_exchanges: Optional[List[str]] = None,
     ) -> QuoteResponse:
         """Ask every provider; ``best`` is the highest output for the user. ``amount`` is base units.
 
@@ -1548,10 +1914,15 @@ class LayerHop(_Base):
         ``gasless=True`` asks for a gasless swap (ERC-20 input, same EVM chain): continue with
         :meth:`build_gasless`. ``referrer`` / ``copy_of`` are referral attribution only. ``purpose``
         (``tip``, ``split``, ``payout``, ``gather``, ``rebalance``, ``fund``), ``split_id`` +
-        ``split_share`` and ``note`` (140 chars) are recorded on the order; none of them change the fee."""
+        ``split_share`` and ``note`` (140 chars) are recorded on the order; none of them change the fee.
+
+        ``exclude_providers`` / ``exclude_bridges`` / ``exclude_exchanges`` (lists of ids, e.g.
+        ``["relay"]``, ``["stargate"]``, ``["1inch"]``) keep those out of every returned route; every
+        entry of ``quotes`` can be built with :meth:`build_tx`, not only ``best``."""
         return self._call("GET", "/quote", params=self._quote_params(
             src_chain, src_token, amount, dst_chain, dst_token, sender, recipient, slippage_bps, gas_on_arrival,
-            gasless, referrer, copy_of, purpose, split_id, split_share, note))
+            gasless, referrer, copy_of, purpose, split_id, split_share, note,
+            exclude_providers, exclude_bridges, exclude_exchanges))
 
     def quote_calls(
         self, src_chain: Union[str, int], src_token: str, dst_chain: Union[str, int], dst_token: str, dst_amount: str,
@@ -1561,7 +1932,11 @@ class LayerHop(_Base):
         """Destination calls (``POST /v1/quote``): an exact-output quote whose ``dst_amount`` of
         ``dst_token`` is used by ``calls`` (``{"to", "data", "value"?}``) or an ``action`` preset
         (``{"type": "aave-v3-supply"}``) on the destination chain, run by the provider's executor (the
-        calls' ``msg.sender``). Quotes carry ``srcAmount`` (what the sender pays) and ``calls``."""
+        calls' ``msg.sender``). Quotes carry ``srcAmount`` (what the sender pays) and ``calls``.
+
+        Without ``calls`` and ``action`` this is a plain exact-output quote ("receive exact amount"):
+        ``dst_amount`` is what the recipient gets, and quotes carry ``srcAmount`` and ``srcAmountMax``
+        (the most the tx can take from the sender)."""
         return self._call("POST", "/quote", json=self._quote_calls_body(
             src_chain, src_token, dst_chain, dst_token, dst_amount, sender, recipient, slippage_bps, calls, action,
             referrer, copy_of))
@@ -1599,6 +1974,12 @@ class LayerHop(_Base):
     def simulate(self, quote_id: str) -> SimulateResponse:
         """Build and dry-run the tx without recording an order."""
         return self._call("POST", "/simulate", json={"quoteId": quote_id})
+
+    def screen(self, addresses: Sequence[str]) -> ScreenResponse:
+        """``POST /v1/screen``: check up to 100 addresses against the OFAC SDN list (D-069). Public.
+        A list lookup only, not legal advice. When ``enforced``, the API refuses listed addresses on
+        quotes, orders, deposit addresses and checkout with ``ADDRESS_SANCTIONED`` (HTTP 451)."""
+        return self._call("POST", "/screen", json={"addresses": list(addresses)})
 
     def status(self, provider: str, id: str) -> OrderStatus:
         """A provider order's state."""
@@ -1664,6 +2045,9 @@ class AsyncLayerHop(_Base):
         self.tip_jars = AsyncTipJars(self)
         self.payouts = AsyncPayouts(self)
         self.webhooks = AsyncWebhooks(self)
+        self.usage = AsyncUsage(self)
+        self.x402 = AsyncX402(self)
+        self.quotes = AsyncQuotes(self)
 
     async def aclose(self) -> None:
         if self._owns_client:
@@ -1684,16 +2068,39 @@ class AsyncLayerHop(_Base):
         return self._handle(res)
 
     async def _stream(self, path: str, event: str) -> AsyncIterator[Any]:
-        async with self._client.stream("GET", self._url(path), headers=self._stream_headers(),
+        events = self._stream_events(path, (event,))
+        try:
+            async for _name, data in events:
+                yield data
+        finally:
+            await events.aclose()  # type: ignore[attr-defined]  # closes the response when the caller stops early
+
+    async def _stream_events(
+        self, path: str, events: Sequence[str], params: Optional[Dict[str, str]] = None,
+    ) -> AsyncIterator[Tuple[str, Any]]:
+        async with self._client.stream("GET", self._url(path), params=params, headers=self._stream_headers(),
                                        timeout=self._stream_timeout_config()) as res:
             if not res.is_success:
                 await res.aread()
                 self._handle(res)
-            parser = _SseParser(event)
+            parser = _SseParser(events)
             async for line in res.aiter_lines():
-                data = parser.feed(line)
-                if data is not None:
-                    yield _json.loads(data)
+                frame = parser.feed(line)
+                if frame is not None:
+                    yield frame[0], _json.loads(frame[1])
+
+    async def _quote_stream(self, params: Dict[str, str]) -> AsyncIterator[QuoteStreamUpdate]:
+        events = self._stream_events("/quote/stream", ("quote", "error", "end"), params)
+        try:
+            async for name, data in events:
+                if name == "quote":
+                    yield data
+                elif name == "error":
+                    raise self._stream_error(data)
+                else:
+                    return
+        finally:
+            await events.aclose()  # type: ignore[attr-defined]
 
     async def health(self) -> Dict[str, Any]:
         return await self._call("GET", "/health")
@@ -1735,11 +2142,13 @@ class AsyncLayerHop(_Base):
         *, sender: str, recipient: str, slippage_bps: int = 50, gas_on_arrival: Union[bool, float, None] = None,
         gasless: bool = False, referrer: Optional[str] = None, copy_of: Optional[str] = None,
         purpose: Optional[QuotePurpose] = None, split_id: Optional[str] = None, split_share: Optional[int] = None,
-        note: Optional[str] = None,
+        note: Optional[str] = None, exclude_providers: Optional[List[str]] = None,
+        exclude_bridges: Optional[List[str]] = None, exclude_exchanges: Optional[List[str]] = None,
     ) -> QuoteResponse:
         return await self._call("GET", "/quote", params=self._quote_params(
             src_chain, src_token, amount, dst_chain, dst_token, sender, recipient, slippage_bps, gas_on_arrival,
-            gasless, referrer, copy_of, purpose, split_id, split_share, note))
+            gasless, referrer, copy_of, purpose, split_id, split_share, note,
+            exclude_providers, exclude_bridges, exclude_exchanges))
 
     async def quote_calls(
         self, src_chain: Union[str, int], src_token: str, dst_chain: Union[str, int], dst_token: str, dst_amount: str,
@@ -1773,6 +2182,9 @@ class AsyncLayerHop(_Base):
 
     async def simulate(self, quote_id: str) -> SimulateResponse:
         return await self._call("POST", "/simulate", json={"quoteId": quote_id})
+
+    async def screen(self, addresses: Sequence[str]) -> ScreenResponse:
+        return await self._call("POST", "/screen", json={"addresses": list(addresses)})
 
     async def status(self, provider: str, id: str) -> OrderStatus:
         return await self._call("GET", f"/orders/{_seg(provider)}/{_seg(id)}")

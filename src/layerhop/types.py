@@ -29,9 +29,10 @@ Vm = Literal["evm", "svm", "tvm"]
 
 ErrorCode = Literal[
     "INVALID_PARAMS", "UNSUPPORTED_CHAIN", "UNSUPPORTED_TOKEN", "AMOUNT_TOO_SMALL", "AMOUNT_TOO_LARGE",
-    "CALLS_REVERTED", "LAUNCH_IMAGE_INVALID", "NO_ROUTE", "QUOTE_NOT_FOUND", "QUOTE_EXPIRED", "ORDER_NOT_FOUND",
+    "CALLS_REVERTED", "LAUNCH_IMAGE_INVALID", "NO_ROUTE", "ROUTE_EXCLUDED", "QUOTE_NOT_FOUND", "QUOTE_EXPIRED", "ORDER_NOT_FOUND",
     "PROVIDER_ERROR", "PROVIDER_TIMEOUT", "RATE_LIMITED", "QUOTA_EXCEEDED", "UNAUTHORIZED", "FORBIDDEN",
-    "NOT_FOUND", "CONFLICT", "GASLESS_PENDING", "GASLESS_FAILED", "INTERNAL",
+    "ADDRESS_SANCTIONED", "NOT_FOUND", "CONFLICT", "GASLESS_PENDING", "GASLESS_FAILED", "MARKET_UNAVAILABLE", "LIMIT_ORDER_REJECTED",
+    "INTERNAL",
 ]
 """Stable error codes (``LayerHopApiError.code`` is a plain ``str``, so new codes still decode)."""
 
@@ -159,6 +160,7 @@ class Quote(TypedDict):
     expiresAt: int
     gasOnArrival: NotRequired[GasOnArrival]  # Present when gas on arrival was requested and this route includes it.
     srcAmount: NotRequired[str]  # What the sender pays (base units), on destination-call and checkout quotes.
+    srcAmountMax: NotRequired[str]  # Exact-output quotes: the most the tx can take from the sender (balance checks).
     calls: NotRequired["DestinationCallsPlan"]  # Destination calls the provider will run (``quote_calls``).
     gasless: NotRequired["GaslessQuoteInfo"]  # Gasless quotes only (``gasless=True``).
 
@@ -214,7 +216,62 @@ class QuoteResponse(TypedDict):
     best: Quote
     quotes: List[Quote]
     errors: List[ProviderError]
+    # Present only when the request was served, but not exactly as asked (``GAS_ON_ARRIVAL_UNAVAILABLE``).
+    warnings: NotRequired[List["QuoteWarning"]]
     livemode: NotRequired[bool]  # ``False`` when the request used an ``lh_test_`` key (sandbox quotes).
+    screening: NotRequired["ScreeningAnnotation"]  # Address screening (D-069), once the API has a list loaded.
+
+
+class QuoteWarning(TypedDict):
+    code: str  # Ignore codes you don't know.
+    message: str
+
+
+class QuoteStreamUpdate(QuoteResponse):
+    """One ``quote`` event of ``quotes.stream()``: a full quote response plus its sequence number."""
+
+    seq: int
+
+
+ScreeningRole = Literal["sender", "recipient", "refundTo", "payer", "payout"]
+
+
+class ScreeningMatch(TypedDict):
+    address: str
+    role: str  # A :data:`ScreeningRole`.
+    lists: List[str]  # e.g. ``["OFAC SDN"]``.
+
+
+class ScreeningAnnotation(TypedDict):
+    """Address screening on quotes, orders and checkout quotes: which addresses are on the OFAC SDN list."""
+
+    source: Literal["ofac_sdn"]
+    listUpdatedAt: Optional[str]
+    sanctioned: List[ScreeningMatch]
+
+
+class ScreeningResult(TypedDict):
+    """``POST /v1/screen``: one address's result."""
+
+    address: str
+    sanctioned: bool
+    lists: List[str]  # Lists the address is on (``"OFAC SDN"``), empty when not listed.
+    source: Literal["ofac_sdn"]
+    listUpdatedAt: Optional[str]  # Publish date of the list checked; ``None`` while no list is loaded.
+
+
+class ScreeningList(TypedDict):
+    source: Literal["ofac_sdn"]
+    name: str
+    publishedAt: Optional[str]
+    fetchedAt: str
+    addressCount: int
+
+
+class ScreenResponse(TypedDict):
+    results: List[ScreeningResult]  # One per address, in order.
+    list: Optional[ScreeningList]  # ``None`` until the API downloaded the list (every result is then not listed).
+    enforced: bool  # The API refuses listed addresses for everyone (``ADDRESS_SANCTIONED``).
 
 
 class Approval(TypedDict):
@@ -375,7 +432,8 @@ class CheckoutSettlement(TypedDict):
 class CheckoutPayment(TypedDict):
     """The current (or final) payment attempt of a checkout session."""
 
-    quoteId: str
+    method: NotRequired[Literal["wallet", "transfer"]]  # ``transfer``: a scan-to-pay transfer (no quote).
+    quoteId: Optional[str]  # ``None`` for a scan-to-pay transfer.
     payer: Optional[str]
     srcChainId: Optional[int]
     srcToken: Optional[str]
@@ -406,8 +464,79 @@ class CheckoutSession(TypedDict):
     payment: Optional[CheckoutPayment]
     reference: NotRequired[Optional[str]]  # Only with the owning account's API key.
     metadata: NotRequired[Optional[Dict[str, str]]]  # Only with the owning account's API key.
+    branding: NotRequired[bool]  # Only with paid plans: ``False`` when the merchant's plan is white-label.
+    transferAvailable: NotRequired[bool]  # The payer can be shown a "Send to address" QR (``start_transfer``).
+    transfer: NotRequired[Optional["CheckoutTransfer"]]  # Scan-to-pay state once asked for, else ``None``.
+    embedOrigins: NotRequired[List[str]]  # Sites allowed to embed this checkout (empty = any).
+    bitcoinAvailable: NotRequired[bool]  # "Pay with Bitcoin" (D-067), where the API enabled it.
+    bitcoin: NotRequired[Optional["CheckoutBitcoin"]]  # The Bitcoin payment once asked for (``start_bitcoin``).
     createdAt: str
     updatedAt: str
+
+
+class CheckoutTransferFee(TypedDict):
+    bps: int
+    amount: str
+
+
+class CheckoutTransferTx(TypedDict):
+    hash: str
+    amount: str
+    at: Optional[str]
+
+
+class CheckoutTransfer(TypedDict):
+    """Scan-to-pay ("Send to address", D-064 / D-065). ``evm_transfer``: send exactly ``amount`` of
+    ``token`` to ``address`` (the amount carries a tag in its sub-cent digits). ``solana_pay``: scan
+    ``uri`` with a Solana wallet. ``evm_splitter``: send exactly ``amount`` to the session's own
+    fee-splitting deposit address."""
+
+    kind: Literal["evm_transfer", "solana_pay", "evm_splitter"]
+    chainId: int
+    token: str
+    symbol: str
+    decimals: int
+    address: str
+    amount: str  # What to send now, base units.
+    amountDue: str
+    fee: Optional[CheckoutTransferFee]
+    uri: str  # QR payload: EIP-681 (EVM) or a Solana Pay transaction request.
+    transferUri: Optional[str]  # Solana Pay transfer request, only when enabled.
+    reference: Optional[str]
+    received: str  # Confirmed so far.
+    seen: str  # Seen but still confirming.
+    state: Literal["waiting", "partial", "paid", "overpaid"]
+    txs: List[CheckoutTransferTx]
+    startedAt: str
+    sweepTxHash: NotRequired[Optional[str]]  # ``evm_splitter`` only.
+
+
+class CheckoutBitcoinQuote(TypedDict):
+    address: str
+    amountSats: str
+    status: str
+    requestId: str
+    createdAt: str
+
+
+class CheckoutBitcoin(TypedDict):
+    """"Pay with Bitcoin" (D-067): send exactly ``amountSats`` (``amountBtc``) to ``address``; the
+    merchant receives ``amountOut`` of the settlement token. ``uri`` is the BIP21 request for the QR.
+    After ``expiresAt`` call ``start_bitcoin`` again for a fresh quote."""
+
+    address: str
+    amountSats: str
+    amountBtc: str
+    uri: str
+    amountOut: str
+    expiresAt: str
+    expired: bool
+    status: str  # Relay status: waiting, depositing, pending, submitted, success, failure or refund.
+    seenSats: str  # Satoshis seen at ``address`` (mempool included).
+    requestId: str
+    feeBps: int
+    refundAddress: Optional[str]
+    quotes: List[CheckoutBitcoinQuote]
 
 
 class CheckoutSessionsPage(TypedDict):
@@ -455,6 +584,7 @@ class CheckoutQuoteResponse(TypedDict):
     best: CheckoutQuote
     quotes: List[CheckoutQuote]
     errors: List[ProviderError]
+    screening: NotRequired[ScreeningAnnotation]  # Address screening (D-069).
 
 
 WebhookEventType = Literal[
@@ -463,6 +593,7 @@ WebhookEventType = Literal[
     "checkout.session.expired", "checkout.session.refunded", "invoice.sent", "invoice.paid",
     "subscription.created", "subscription.renewed", "subscription.past_due", "subscription.canceled",
     "limit_order.opened", "limit_order.filled", "limit_order.cancelled", "limit_order.expired", "limit_order.failed",
+    "x402.payment.settled",
 ]
 
 
@@ -476,7 +607,8 @@ class WebhookEvent(TypedDict):
     createdAt: str
     # ``{"order": Order}``, ``{"session": CheckoutSession}``, plus ``refund`` / ``invoice``;
     # ``{"subscription": Subscription}`` (``renewed`` / ``past_due`` add ``invoice``);
-    # ``{"limitOrder": LimitOrder}`` (``limit_order.filled`` adds ``fill``, the fill's OrderSummary).
+    # ``{"limitOrder": LimitOrder}`` (``limit_order.filled`` adds ``fill``, the fill's OrderSummary);
+    # ``{"payment": X402Payment}`` (``x402.payment.settled``).
     data: Dict[str, Any]
 
 
@@ -484,6 +616,88 @@ class TriggerWebhookResponse(TypedDict):
     eventId: str
     deliveries: int  # Test endpoints the event was queued for.
     payload: WebhookEvent
+
+
+class WebhookResendDelivery(TypedDict):
+    id: str
+    endpointId: str
+
+
+class WebhookResendResult(TypedDict):
+    """``webhooks.resend()``: the deliveries queued (empty when only open streams get it)."""
+
+    eventId: str
+    type: str
+    livemode: bool
+    deliveries: List[WebhookResendDelivery]
+
+
+StatusClassCounts = TypedDict("StatusClassCounts", {"2xx": int, "3xx": int, "4xx": int, "5xx": int})
+"""Requests per HTTP status class."""
+
+UsageBucket = Literal["hour", "day"]
+
+
+class UsageTotals(TypedDict):
+    requests: int
+    errors: int
+    byStatusClass: StatusClassCounts
+    avgMs: Optional[float]
+    p50Ms: Optional[float]
+    p95Ms: Optional[float]
+
+
+class UsagePoint(TypedDict):
+    ts: str
+    requests: int
+    errors: int
+    byStatusClass: StatusClassCounts
+    p50Ms: Optional[float]
+    p95Ms: Optional[float]
+
+
+class UsageEndpoint(TypedDict):
+    group: str
+    requests: int
+    errors: int
+    byStatusClass: StatusClassCounts
+    avgMs: Optional[float]
+    p50Ms: Optional[float]
+    p95Ms: Optional[float]
+
+
+class UsageErrorCode(TypedDict):
+    code: str
+    count: int
+    byEndpoint: Dict[str, int]
+
+
+UsageReport = TypedDict("UsageReport", {
+    "bucket": UsageBucket,
+    "from": str,
+    "to": str,
+    "livemode": bool,
+    "keyId": Optional[str],
+    "totals": UsageTotals,
+    "series": List[UsagePoint],
+    "byEndpoint": List[UsageEndpoint],
+    "errorCodes": List[UsageErrorCode],
+})
+"""``GET /v1/usage``: the key's account and mode. Latency percentiles are estimates (``None`` without traffic)."""
+
+
+class UsageError(TypedDict):
+    """One failed request from ``usage.errors()``."""
+
+    ts: str
+    keyId: Optional[str]
+    requestId: str
+    method: str
+    path: str
+    endpointGroup: str
+    status: int
+    code: str
+    latencyMs: int
 
 
 InvoiceStatus = Literal["draft", "open", "paid", "void"]
@@ -1034,6 +1248,99 @@ class RecurringOrderSubmitResponse(TypedDict):
 class RecurringOrderCancelResponse(TypedDict):
     requestId: str
     tx: SvmTx
+
+
+X402PaymentStatus = Literal["submitted", "settled", "failed"]
+
+
+class X402Kind(TypedDict):
+    x402Version: int  # 1 or 2.
+    scheme: str  # ``exact``.
+    network: str  # A CAIP-2 id (v2, ``eip155:8453``) or a v1 name (``base``).
+
+
+class X402Supported(TypedDict):
+    """``GET /v1/x402/supported``: what LayerHop's facilitator verifies and settles."""
+
+    kinds: List[X402Kind]
+    extensions: List[str]
+    signers: Dict[str, List[str]]
+    settle: bool  # Whether ``POST /v1/x402/settle`` is enabled.
+
+
+class X402Payee(TypedDict):
+    id: str
+    network: str
+    chainId: int
+    asset: str
+    depositAddress: str  # Your fee-splitting deposit address: the requirements' ``payTo``.
+    merchant: str
+    resource: str
+    feeBps: int
+    factory: str
+    lastSweepTx: NotRequired[Optional[str]]
+    lastSweptAt: NotRequired[Optional[str]]
+
+
+class X402Fee(TypedDict):
+    bps: int
+    amount: str
+
+
+class X402Requirements(TypedDict):
+    """``POST /v1/x402/requirements``: answer ``402 Payment Required`` with these. ``accepts`` is the
+    x402 v2 form, ``acceptsV1`` the v1 form, ``paymentRequired`` the v2 ``PaymentRequired`` object
+    (base64 it into the ``PAYMENT-REQUIRED`` header)."""
+
+    payee: X402Payee
+    price: str  # What you net, USDC base units.
+    amount: str  # What the payer signs (price + fee).
+    fee: X402Fee
+    accepts: List[Dict[str, Any]]
+    acceptsV1: List[Dict[str, Any]]
+    paymentRequired: Dict[str, Any]
+
+
+class X402VerifyResponse(TypedDict):
+    isValid: bool
+    invalidReason: NotRequired[str]  # x402 reason, e.g. ``insufficient_funds``.
+    payer: NotRequired[str]
+    message: NotRequired[str]
+
+
+class X402SettleResponse(TypedDict):
+    success: bool
+    errorReason: NotRequired[str]  # ``settlement_pending``: sent, receipt not in yet.
+    payer: NotRequired[str]
+    transaction: str  # Transaction hash (empty when nothing was sent).
+    network: str
+    message: NotRequired[str]
+
+
+class X402Payment(TypedDict):
+    id: str
+    object: Literal["x402.payment"]
+    status: X402PaymentStatus
+    statusDetail: NotRequired[Optional[str]]
+    network: str
+    chainId: int
+    asset: str
+    payer: str
+    payTo: str  # The deposit address paid.
+    amount: str  # What the payer paid (USDC base units).
+    merchantAmount: str  # What you net after the deposit contract's fee.
+    feeBps: int
+    resource: NotRequired[Optional[str]]
+    transaction: NotRequired[Optional[str]]
+    sweepTx: NotRequired[Optional[str]]  # The sweep that paid it out to you.
+    settledAt: NotRequired[Optional[str]]
+    createdAt: str
+    updatedAt: NotRequired[str]
+
+
+class X402PaymentsPage(TypedDict):
+    payments: List[X402Payment]
+    nextCursor: Optional[str]
 
 
 Json = Dict[str, Any]

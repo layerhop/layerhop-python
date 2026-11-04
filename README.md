@@ -75,8 +75,10 @@ async with AsyncLayerHop() as lh:
 | `token_risk(chain, address)` | `GET /v1/tokens/{chain}/{address}/risk` → the `risk` |
 | `prices(ids)` | `GET /v1/prices` → `{"chainId:address": usd}` |
 | `balances(address, chains=None, *, tokens, fresh)` | `GET /v1/balances` |
-| `quote(src_chain, src_token, amount, dst_chain, dst_token, *, sender, recipient, slippage_bps=50, gas_on_arrival=None, gasless=False, referrer, copy_of, purpose, split_id, split_share, note)` | `GET /v1/quote` |
-| `quote_calls(src_chain, src_token, dst_chain, dst_token, dst_amount, *, sender, recipient, slippage_bps=50, calls, action, referrer, copy_of)` | `POST /v1/quote` (destination calls) |
+| `quote(src_chain, src_token, amount, dst_chain, dst_token, *, sender, recipient, slippage_bps=50, gas_on_arrival=None, gasless=False, referrer, copy_of, purpose, split_id, split_share, note, exclude_providers, exclude_bridges, exclude_exchanges)` | `GET /v1/quote` |
+| `quote_calls(src_chain, src_token, dst_chain, dst_token, dst_amount, *, sender, recipient, slippage_bps=50, calls, action, referrer, copy_of)` | `POST /v1/quote` (destination calls; without `calls` / `action`: receive an exact amount) |
+| `quotes.stream(src_chain, src_token, amount, dst_chain, dst_token, *, sender, recipient, dst_amount=None, interval_ms=None, …)` | `GET /v1/quote/stream` (SSE): yields live quote sets, raises `LayerHopApiError` on an `error` event |
+| `screen(addresses)` | `POST /v1/screen` (OFAC SDN list lookup, public) |
 | `build_tx(quote_id)` | `POST /v1/orders` → the `tx` (EVM, Solana or Tron) |
 | `build_gasless(quote_id)` | `POST /v1/orders` → the `gasless` typed data to sign |
 | `submit_gasless(quote_id, trade_signature, approval_signature=None)` · `gasless_status(quote_id)` | `POST /v1/orders/gasless` · `GET /v1/orders/gasless/{quoteId}` |
@@ -87,12 +89,13 @@ async with AsyncLayerHop() as lh:
 | `watch(provider, id, *, interval=3.0, timeout=1800)` | polls `status`, yields on change, stops when final |
 | `stream_order(quote_id)` | `GET /v1/orders/{quoteId}/events` (SSE), yields the order until final |
 | `list_orders(*, address, status, cursor, limit)` | `GET /v1/orders` |
-| `checkout.create(amount, settle_chain, settle_token, recipient, *, merchant_name, description, reference, metadata, success_url, cancel_url, expires_in_minutes)` | `POST /v1/checkout/sessions` |
+| `checkout.create(amount, settle_chain, settle_token, recipient, *, merchant_name, description, reference, metadata, success_url, cancel_url, expires_in_minutes, embed_origins)` | `POST /v1/checkout/sessions` |
 | `checkout.list(*, status, cursor, limit)` | `GET /v1/checkout/sessions` |
 | `checkout.get(id)` | `GET /v1/checkout/sessions/{id}` (public) |
 | `checkout.expire(id)` | `POST /v1/checkout/sessions/{id}/expire` |
 | `checkout.quote(id, src_chain, src_token, *, sender, slippage_bps=None)` | `POST /v1/checkout/sessions/{id}/quote` (public) |
 | `checkout.stream(id)` | `GET /v1/checkout/sessions/{id}/events` (SSE, public) |
+| `checkout.start_transfer(id)` · `checkout.start_bitcoin(id, *, refund_address)` | `POST /v1/checkout/sessions/{id}/transfer` · `/bitcoin` (public) |
 | `checkout.products.create(name, amount, settle_chain, settle_token, recipient, *, description, merchant_name, success_url, cancel_url, expires_in_minutes, allowed_origins, active)` | `POST /v1/checkout/products` |
 | `checkout.products.list(*, active, cursor, limit)` | `GET /v1/checkout/products` |
 | `checkout.products.get(id)` | `GET /v1/checkout/products/{id}` (public) |
@@ -125,8 +128,13 @@ async with AsyncLayerHop() as lh:
 | `tip_jars.get(address)` | `GET /v1/tip-jars/{address}` |
 | `payouts.plan(src_chain, src_token, sender, *, rows, csv)` · `payouts.transfers(chain, token, sender, transfers)` | `POST /v1/payouts/plan` · `/v1/payouts/transfers` |
 | `service_status()` | `GET /v1/status` (platform status, public) |
-| `webhooks.stream()` | `GET /v1/webhooks/stream` (SSE, API key) |
+| `webhooks.stream(*, since)` | `GET /v1/webhooks/stream` (SSE, API key; `since` replays up to an hour) |
 | `webhooks.trigger(type)` | `POST /v1/webhooks/trigger` (test keys only) |
+| `webhooks.resend(event_id, *, endpoint_id)` | `POST /v1/webhooks/events/{id}/resend` |
+| `usage.get(*, bucket, from_, to, key_id)` · `usage.errors(*, code, key_id, limit)` | `GET /v1/usage` · `GET /v1/usage/errors` → the `errors` |
+| `x402.supported()` · `x402.requirements(amount, pay_to, resource, *, network, description, mime_type, max_timeout_seconds)` | `GET /v1/x402/supported` · `POST /v1/x402/requirements` |
+| `x402.verify(payment_payload, payment_requirements, *, x402_version)` · `x402.settle(…)` | `POST /v1/x402/verify` · `/settle` |
+| `x402.payments.list(*, status, cursor, limit)` · `x402.payments.get(id)` | `GET /v1/x402/payments` · `/v1/x402/payments/{id}` |
 
 Client options: `base_url` (default `https://api.layerhop.com`), `api_key` (sent as `x-api-key`),
 `channel` (default `"api"`), `integrator`, `integrator_fee_bps`, `timeout`, `stream_timeout` (read
@@ -272,6 +280,38 @@ The request is sent when iteration starts; break out of the loop to close the co
 missing order raises `LayerHopApiError` (`ORDER_NOT_FOUND`). Guide:
 https://docs.layerhop.com/guides/live-status
 
+## Live quotes
+
+`quotes.stream` (`GET /v1/quote/stream`) yields a fresh ranked quote set (the `quote` response plus
+`seq`) whenever the best route or an amount changes, and before the shown quote expires. It ends
+after 5 minutes; a failed refresh raises `LayerHopApiError` (`NO_ROUTE`, `RATE_LIMITED`,
+`ADDRESS_SANCTIONED`, …). Each refresh counts as one request against your rate limit (default every
+10 s, `interval_ms` at least 5000); at most 3 open streams per key. Pass `amount=None,
+dst_amount="…"` for exact output.
+
+```python
+for update in lh.quotes.stream("base", "USDC", "100000000", "solana", "SOL", sender=a, recipient=b):
+    show(update["best"])  # any quoteId is buildable with build_tx
+
+# async
+async for update in alh.quotes.stream("base", "USDC", None, "arbitrum", "USDC", sender=a, recipient=a,
+                                      dst_amount="5000000", interval_ms=15000):
+    ...
+```
+
+Guide: https://docs.layerhop.com/guides/live-quotes
+
+## Address screening
+
+`lh.screen([...])` checks up to 100 addresses against the OFAC SDN list (public, a list lookup only).
+Quotes and checkout quotes carry `screening` (the listed addresses of the request) once the API has
+the list loaded; where the API enforces screening, listed addresses get `ADDRESS_SANCTIONED` (HTTP 451).
+
+```python
+r = lh.screen(["0x098B716B8Aaf21512996dC57EB0615e2383E2f96"])
+r["results"][0]["sanctioned"], r["list"], r["enforced"]
+```
+
 ## Checkout (pay with any token)
 
 Get paid in USDC or USDT on the chain you choose while the customer pays with any token on any
@@ -301,6 +341,12 @@ tx = lh.build_tx(best["quoteId"])
 # ... the payer's wallet signs and broadcasts tx ...
 lh.report_submitted(best["quoteId"], tx_hash)
 ```
+
+Sessions also carry the hosted page's other payment methods: `transferAvailable` / `transfer`
+("Send to address" QR, `checkout.start_transfer(id)`), `bitcoinAvailable` / `bitcoin` ("Pay with
+Bitcoin", `checkout.start_bitcoin(id, refund_address=…)`) and `payment["method"]` (`wallet` or
+`transfer`; a transfer has no `quoteId`). `embed_origins` on `create` limits which sites may embed
+the session.
 
 The async client has the same methods under `await lh.checkout.…`. Guide:
 https://docs.layerhop.com/guides/checkout
@@ -513,9 +559,33 @@ creates a sample event in test mode (test keys only; a live key raises `FORBIDDE
 ```python
 lh = LayerHop(api_key="lh_test_...")
 r = lh.webhooks.trigger("order.filled")  # {"eventId", "deliveries", "payload"}
-for event in lh.webhooks.stream():       # runs until you break (or the server closes it)
+for event in lh.webhooks.stream(since="2026-11-04T09:30:00Z"):  # replays missed events first
     print(event["type"], event["data"])
+lh.webhooks.resend("evt_...")            # to subscribed endpoints (or endpoint_id=...) and open streams
 ```
+
+### Usage
+
+`usage.get()` returns the key's requests per hour or day (status classes, p50 / p95 latency, endpoint
+groups, error codes); `usage.errors(code="NO_ROUTE")` the newest failed requests with their `requestId`.
+
+## x402 pay-per-request
+
+LayerHop is an x402 facilitator: charge USDC per HTTP request, paid to your own fee-splitting deposit
+address (the payer pays the fee on top). Answer an unpaid request with `402` and the requirements,
+then verify and settle the `X-PAYMENT` / `PAYMENT-SIGNATURE` header (base64 JSON):
+
+```python
+req = lh.x402.requirements("10000", "0xYourWallet", "https://api.example.com/weather")  # 0.01 USDC net
+# 402 body: {"x402Version": 1, "error": "...", "accepts": req["acceptsV1"]}
+payload = json.loads(base64.b64decode(request.headers["X-PAYMENT"]))
+if lh.x402.verify(payload, req["acceptsV1"][0])["isValid"]:
+    ...  # serve the request
+    lh.x402.settle(payload, req["acceptsV1"][0])
+lh.x402.payments.list(status="settled")
+```
+
+Guide: https://docs.layerhop.com/guides/x402
 
 ## Development
 
